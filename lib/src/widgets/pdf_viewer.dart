@@ -425,14 +425,11 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
     if (widget.params.scrollPhysics == null || _viewSize == null) {
       return widget.params.boundaryMargin ?? const EdgeInsets.all(double.infinity);
     }
-    // FIXME: It does not work correctly...
     final scale = _txController.value.zoom;
     var hm = max((_viewSize!.width - _layout!.documentSize.width * scale), 0.0);
     var vm = max((_viewSize!.height - _layout!.documentSize.height * scale), 0.0);
     if (hm == 0 && vm == 0) return const EdgeInsets.all(double.infinity);
-    final ret = EdgeInsets.fromLTRB(hm / 2, vm, _layout!.documentSize.width * scale + hm, vm);
-    print('boundaryMargin: $ret, viewSize: $_viewSize, layout: ${_layout!.documentSize}, scale: $scale');
-    return ret;
+    return EdgeInsets.fromLTRB(hm / 2, vm / 2, hm / 2, vm / 2);
   }
 
   void _updateLayout(Size viewSize) {
