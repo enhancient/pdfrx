@@ -324,8 +324,7 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver {
                           enableTextSelection: true,
                           useAlternativeFitScaleAsMinScale: false,
                           maxScale: 8,
-                          normalizeMatrix: (matrix, viewSize, layout, controller) => matrix,
-                          boundaryMargin: EdgeInsets.zero,
+                          scrollPhysics: const BouncingScrollPhysics(),
                           onViewSizeChanged: (viewSize, oldViewSize, controller) {
                             if (oldViewSize != null) {
                               //

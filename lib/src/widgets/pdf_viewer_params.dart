@@ -21,6 +21,7 @@ class PdfViewerParams {
     this.useAlternativeFitScaleAsMinScale = true,
     this.panAxis = PanAxis.free,
     this.boundaryMargin,
+    this.scrollPhysics,
     this.annotationRenderingMode = PdfAnnotationRenderingMode.annotationAndForms,
     this.pageAnchor = PdfPageAnchor.top,
     this.pageAnchorEnd = PdfPageAnchor.bottom,
@@ -154,6 +155,8 @@ class PdfViewerParams {
   ///
   /// The default is `EdgeInsets.all(double.infinity)`.
   final EdgeInsets? boundaryMargin;
+
+  final ScrollPhysics? scrollPhysics;
 
   /// Annotation rendering mode.
   final PdfAnnotationRenderingMode annotationRenderingMode;
@@ -526,6 +529,7 @@ class PdfViewerParams {
         other.useAlternativeFitScaleAsMinScale != useAlternativeFitScaleAsMinScale ||
         other.panAxis != panAxis ||
         other.boundaryMargin != boundaryMargin ||
+        other.scrollPhysics != scrollPhysics ||
         other.annotationRenderingMode != annotationRenderingMode ||
         other.pageAnchor != pageAnchor ||
         other.pageAnchorEnd != pageAnchorEnd ||
@@ -557,6 +561,7 @@ class PdfViewerParams {
         other.useAlternativeFitScaleAsMinScale == useAlternativeFitScaleAsMinScale &&
         other.panAxis == panAxis &&
         other.boundaryMargin == boundaryMargin &&
+        other.scrollPhysics == scrollPhysics &&
         other.annotationRenderingMode == annotationRenderingMode &&
         other.pageAnchor == pageAnchor &&
         other.pageAnchorEnd == pageAnchorEnd &&
@@ -609,6 +614,7 @@ class PdfViewerParams {
         useAlternativeFitScaleAsMinScale.hashCode ^
         panAxis.hashCode ^
         boundaryMargin.hashCode ^
+        scrollPhysics.hashCode ^
         annotationRenderingMode.hashCode ^
         pageAnchor.hashCode ^
         pageAnchorEnd.hashCode ^

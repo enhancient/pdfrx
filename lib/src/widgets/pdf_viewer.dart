@@ -386,8 +386,8 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
                       iv.InteractiveViewer(
                         transformationController: _txController,
                         constrained: false,
-                        scrollPhysics: const BouncingScrollPhysics(),
-                        boundaryMargin: widget.params.boundaryMargin ?? const EdgeInsets.all(double.infinity),
+                        scrollPhysics: widget.params.scrollPhysics,
+                        boundaryMargin: _getBoundaryMargin(),
                         maxScale: widget.params.maxScale,
                         minScale: _alternativeFitScale != null ? _alternativeFitScale! / 2 : minScale,
                         panAxis: widget.params.panAxis,
@@ -419,6 +419,20 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
         ),
       ),
     );
+  }
+
+  EdgeInsets _getBoundaryMargin() {
+    if (widget.params.scrollPhysics == null || _viewSize == null) {
+      return widget.params.boundaryMargin ?? const EdgeInsets.all(double.infinity);
+    }
+    // FIXME: It does not work correctly...
+    final scale = _txController.value.zoom;
+    var hm = max((_viewSize!.width - _layout!.documentSize.width * scale), 0.0);
+    var vm = max((_viewSize!.height - _layout!.documentSize.height * scale), 0.0);
+    if (hm == 0 && vm == 0) return const EdgeInsets.all(double.infinity);
+    final ret = EdgeInsets.fromLTRB(hm / 2, vm, _layout!.documentSize.width * scale + hm, vm);
+    print('boundaryMargin: $ret, viewSize: $_viewSize, layout: ${_layout!.documentSize}, scale: $scale');
+    return ret;
   }
 
   void _updateLayout(Size viewSize) {
@@ -1135,6 +1149,11 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
 
   /// Restrict matrix to the safe range.
   Matrix4 _makeMatrixInSafeRange(Matrix4 newValue) {
+    // if scroll physics is specified, we should accept the matrix as it is
+    if (widget.params.scrollPhysics != null) {
+      return newValue;
+    }
+
     if (widget.params.normalizeMatrix != null) {
       return widget.params.normalizeMatrix!(newValue, _viewSize!, _layout!, _controller);
     }
