@@ -386,6 +386,7 @@ class _PdfViewerState extends State<PdfViewer> with SingleTickerProviderStateMix
                       iv.InteractiveViewer(
                         transformationController: _txController,
                         constrained: false,
+                        scrollPhysics: const BouncingScrollPhysics(),
                         boundaryMargin: widget.params.boundaryMargin ?? const EdgeInsets.all(double.infinity),
                         maxScale: widget.params.maxScale,
                         minScale: _alternativeFitScale != null ? _alternativeFitScale! / 2 : minScale,
