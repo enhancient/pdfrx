@@ -717,7 +717,7 @@ class _InteractiveViewerState extends State<InteractiveViewer> with TickerProvid
         final double contentHeight = _boundaryRect.height * currentScale;
         final double desiredContentHeight = _boundaryRect.height * incrementalScale;
 
-        // Build synthetic ScrollMetrics for the resistence physics
+        // Build synthetic ScrollMetrics for the resistance physics
 
         final ScrollMetrics metricsX = FixedScrollMetrics(
           pixels: contentWidth,
@@ -1336,7 +1336,7 @@ class _InteractiveViewerState extends State<InteractiveViewer> with TickerProvid
     if (simulationY == null) {
       return simulationX;
     }
-    return CombinedSimulation(simulationX: simulationX, simulationY: simulationY);
+    return _CombinedSimulation(simulationX: simulationX, simulationY: simulationY);
   }
 
   void _stopAnimation() {
@@ -1598,8 +1598,8 @@ Axis? _getPanAxis(Offset point1, Offset point2) {
 /// ScrollPhysics
 /// A simulation that combines two one-dimensional simulations into one,
 /// one for the x axis and one for the y axis.
-class CombinedSimulation extends Simulation {
-  CombinedSimulation({required this.simulationX, required this.simulationY});
+class _CombinedSimulation extends Simulation {
+  _CombinedSimulation({required this.simulationX, required this.simulationY});
   final Simulation simulationX;
   final Simulation simulationY;
 
