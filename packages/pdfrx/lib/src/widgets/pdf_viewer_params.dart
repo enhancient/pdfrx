@@ -70,6 +70,7 @@ class PdfViewerParams {
     this.keyHandlerParams = const PdfViewerKeyHandlerParams(),
     this.behaviorControlParams = const PdfViewerBehaviorControlParams(),
     this.forceReload = false,
+    this.pageFit = PdfPageFit.none,
   });
 
   /// Margin around the page.
@@ -534,6 +535,9 @@ class PdfViewerParams {
   /// sometimes it is useful to force reload the viewer by setting this to true.
   final bool forceReload;
 
+  /// Page fit option for the PDF viewer.
+  final PdfPageFit pageFit;
+
   /// Determine whether the viewer needs to be reloaded or not.
   ///
   bool doChangesRequireReload(PdfViewerParams? other) {
@@ -565,7 +569,8 @@ class PdfViewerParams {
         other.scrollByArrowKey != scrollByArrowKey ||
         other.horizontalCacheExtent != horizontalCacheExtent ||
         other.verticalCacheExtent != verticalCacheExtent ||
-        other.linkHandlerParams != linkHandlerParams;
+        other.linkHandlerParams != linkHandlerParams ||
+        other.pageFit != pageFit;
   }
 
   @override
@@ -625,7 +630,8 @@ class PdfViewerParams {
         other.onKey == onKey &&
         other.keyHandlerParams == keyHandlerParams &&
         other.behaviorControlParams == behaviorControlParams &&
-        other.forceReload == forceReload;
+        other.forceReload == forceReload &&
+        other.pageFit == pageFit;
   }
 
   @override
@@ -683,7 +689,8 @@ class PdfViewerParams {
         onKey.hashCode ^
         keyHandlerParams.hashCode ^
         behaviorControlParams.hashCode ^
-        forceReload.hashCode;
+        forceReload.hashCode ^
+        pageFit.hashCode;
   }
 }
 
@@ -1139,7 +1146,12 @@ typedef PdfViewerGetPageRenderingScale =
 /// - [pages] is the list of pages.
 ///   This is just a copy of the first loaded page of the document.
 /// - [params] is the viewer parameters.
-typedef PdfPageLayoutFunction = PdfPageLayout Function(List<PdfPage> pages, PdfViewerParams params);
+typedef PdfPageLayoutFunction = PdfPageLayout Function(
+  List<PdfPage> pages,
+  PdfViewerParams params,
+  List<double> pageFitWidths,
+  List<double> pageFitHeights,
+);
 
 /// Function to normalize the matrix.
 ///
@@ -1393,6 +1405,21 @@ enum PdfViewerGeneralTapType {
 
   /// Secondary tap gesture.
   secondaryTap,
+}
+
+/// Page fit options for the PDF viewer.
+enum PdfPageFit {
+  /// Ensure all pages can fully fit in the view
+  fit,
+
+  /// Ensure that a page will fill the view
+  fill,
+
+  /// Let the viewer decide the best fit
+  auto,
+
+  /// No fit: minScale will be used
+  none,
 }
 
 /// Parameters to customize the behavior of the PDF viewer.
