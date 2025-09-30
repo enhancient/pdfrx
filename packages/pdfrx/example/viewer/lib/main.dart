@@ -1,5 +1,3 @@
-import 'dart:math';
-
 import 'package:file_selector/file_selector.dart' as fs;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -309,9 +307,12 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver {
                           },
                         ),
                         keyHandlerParams: PdfViewerKeyHandlerParams(autofocus: true),
-                        useAlternativeFitScaleAsMinScale: false,
+                        // useAlternativeFitScaleAsMinScale: false,
                         maxScale: 8,
-                        //scrollPhysics: PdfViewerParams.getScrollPhysics(context),
+                        fitMode: FitMode.fill,
+                        margin: 5,
+                        boundaryMargin: const EdgeInsets.all(0),
+                        scrollPhysics: PdfViewerParams.getScrollPhysics(context),
                         viewerOverlayBuilder: (context, size, handleLinkTap) => [
                           //
                           // Example use of GestureDetector to handle custom gestures
@@ -477,55 +478,14 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver {
     // The default layout
     null,
     // Horizontal layout
-    (pages, params) {
-      final height = pages.fold(0.0, (prev, page) => max(prev, page.height)) + params.margin * 2;
-      final pageLayouts = <Rect>[];
-      double x = params.margin;
-      for (var page in pages) {
-        pageLayouts.add(
-          Rect.fromLTWH(
-            x,
-            (height - page.height) / 2, // center vertically
-            page.width,
-            page.height,
-          ),
-        );
-        x += page.width + params.margin;
-      }
-      return PdfPageLayout(pageLayouts: pageLayouts, documentSize: Size(x, height));
-    },
+    (pages, params) => HorizontalPageLayout.fromPages(pages, params),
     // Facing pages layout
-    (pages, params) {
-      final width = pages.fold(0.0, (prev, page) => max(prev, page.width));
-
-      final pageLayouts = <Rect>[];
-      final offset = needCoverPage ? 1 : 0;
-      double y = params.margin;
-      for (int i = 0; i < pages.length; i++) {
-        final page = pages[i];
-        final pos = i + offset;
-        final isLeft = isRightToLeftReadingOrder ? (pos & 1) == 1 : (pos & 1) == 0;
-
-        final otherSide = (pos ^ 1) - offset;
-        final h = 0 <= otherSide && otherSide < pages.length ? max(page.height, pages[otherSide].height) : page.height;
-
-        pageLayouts.add(
-          Rect.fromLTWH(
-            isLeft ? width + params.margin - page.width : params.margin * 2 + width,
-            y + (h - page.height) / 2,
-            page.width,
-            page.height,
-          ),
-        );
-        if (pos & 1 == 1 || i + 1 == pages.length) {
-          y += h + params.margin;
-        }
-      }
-      return PdfPageLayout(
-        pageLayouts: pageLayouts,
-        documentSize: Size((params.margin + width) * 2 + params.margin, y),
-      );
-    },
+    (pages, params) => FacingPagesLayout.fromPages(
+      pages,
+      params,
+      needCoverPage: needCoverPage,
+      isRightToLeftReadingOrder: isRightToLeftReadingOrder,
+    ),
   ];
 
   void _addCurrentSelectionToMarkers(Color color) {

@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../pdfrx.dart';
-import '../utils/platform.dart';
+import '../utils/native/native.dart';
 
 /// Viewer customization parameters.
 ///
@@ -18,8 +18,10 @@ class PdfViewerParams {
     this.backgroundColor = Colors.grey,
     this.layoutPages,
     this.normalizeMatrix,
+    this.fitMode = FitMode.fit,
     this.maxScale = 8.0,
     this.minScale = 0.1,
+    this.autoMinScale = true,
     this.useAlternativeFitScaleAsMinScale = true,
     this.panAxis = PanAxis.free,
     this.boundaryMargin,
@@ -139,6 +141,14 @@ class PdfViewerParams {
   /// ```
   final PdfMatrixNormalizeFunction? normalizeMatrix;
 
+  /// How pages should be fitted within the viewport.
+  ///
+  /// - [FitMode.fit]: Entire page/spread visible (may have letterboxing)
+  /// - [FitMode.fill]: Fill viewport (may crop content perpendicular to scroll direction)
+  ///
+  /// The default is [FitMode.fit].
+  final FitMode fitMode;
+
   /// The maximum allowed scale.
   ///
   /// The default is 8.0.
@@ -148,9 +158,20 @@ class PdfViewerParams {
   ///
   /// The default is 0.1.
   ///
-  /// Please note that the value is not used if [useAlternativeFitScaleAsMinScale] is true.
-  /// See [useAlternativeFitScaleAsMinScale] for the details.
+  /// Please note that the value is not used if [autoMinScale] or [useAlternativeFitScaleAsMinScale] is true.
+  /// See [autoMinScale] and [useAlternativeFitScaleAsMinScale] for the details.
   final double minScale;
+
+  /// If true, automatically calculate the minimum scale using [fitMode].
+  ///
+  /// When enabled, the minimum scale is calculated using the layout's `calculateScale()` method
+  /// with the current [fitMode], ensuring the content fits appropriately in the viewport.
+  ///
+  /// This provides a more intelligent minimum scale that respects the layout type and fit mode,
+  /// compared to the older [useAlternativeFitScaleAsMinScale] system.
+  ///
+  /// The default is true.
+  final bool autoMinScale;
 
   /// If true, the minimum scale is set to the calculated [PdfViewerController.alternativeFitScale].
   ///
@@ -571,8 +592,10 @@ class PdfViewerParams {
         forceReload ||
         other.margin != margin ||
         other.backgroundColor != backgroundColor ||
+        other.fitMode != fitMode ||
         other.maxScale != maxScale ||
         other.minScale != minScale ||
+        other.autoMinScale != autoMinScale ||
         other.useAlternativeFitScaleAsMinScale != useAlternativeFitScaleAsMinScale ||
         other.panAxis != panAxis ||
         other.boundaryMargin != boundaryMargin ||
@@ -605,8 +628,10 @@ class PdfViewerParams {
 
     return other.margin == margin &&
         other.backgroundColor == backgroundColor &&
+        other.fitMode == fitMode &&
         other.maxScale == maxScale &&
         other.minScale == minScale &&
+        other.autoMinScale == autoMinScale &&
         other.useAlternativeFitScaleAsMinScale == useAlternativeFitScaleAsMinScale &&
         other.panAxis == panAxis &&
         other.boundaryMargin == boundaryMargin &&
@@ -664,8 +689,10 @@ class PdfViewerParams {
   int get hashCode {
     return margin.hashCode ^
         backgroundColor.hashCode ^
+        fitMode.hashCode ^
         maxScale.hashCode ^
         minScale.hashCode ^
+        autoMinScale.hashCode ^
         useAlternativeFitScaleAsMinScale.hashCode ^
         panAxis.hashCode ^
         boundaryMargin.hashCode ^
