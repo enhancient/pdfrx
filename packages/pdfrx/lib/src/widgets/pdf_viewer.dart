@@ -1520,16 +1520,36 @@ class _PdfViewerState extends State<PdfViewer>
 
   void _onWheelDelta(PointerScrollEvent event) {
     _startInteraction();
-    final dx = -event.scrollDelta.dx * widget.params.scrollByMouseWheel! / _currentZoom;
-    final dy = -event.scrollDelta.dy * widget.params.scrollByMouseWheel! / _currentZoom;
-    final m = _txController.value.clone();
-    if (widget.params.scrollHorizontallyByMouseWheel) {
-      m.translateByDouble(dy, dx, 0, 1);
-    } else {
-      m.translateByDouble(dx, dy, 0, 1);
+    try {
+      if (!kIsWeb) {
+        // To make the behavior consistent across platforms, we only handle zooming on web via Ctrl+wheel.
+        if (HardwareKeyboard.instance.isControlPressed) {
+          // NOTE: I believe that either only dx or dy is set, but I don't know which one is guaranteed to be set.
+          // So, I just add both values.
+          var zoomFactor = -(event.scrollDelta.dx + event.scrollDelta.dy) / 120.0;
+          final newZoom = (_currentZoom * (pow(1.2, zoomFactor))).clamp(widget.params.minScale, widget.params.maxScale);
+          if (_areZoomsAlmostIdentical(newZoom, _currentZoom)) return;
+          // NOTE: _onWheelDelta may be called from other widget's context and localPosition may be incorrect.
+          _controller!.zoomOnLocalPosition(
+            localPosition: _controller!.globalToLocal(event.position)!,
+            newZoom: newZoom,
+            duration: Duration.zero,
+          );
+          return;
+        }
+      }
+      final dx = -event.scrollDelta.dx * widget.params.scrollByMouseWheel! / _currentZoom;
+      final dy = -event.scrollDelta.dy * widget.params.scrollByMouseWheel! / _currentZoom;
+      final m = _txController.value.clone();
+      if (widget.params.scrollHorizontallyByMouseWheel) {
+        m.translateByDouble(dy, dx, 0, 1);
+      } else {
+        m.translateByDouble(dx, dy, 0, 1);
+      }
+      _txController.value = _makeMatrixInSafeRange(m, forceClamp: true);
+    } finally {
+      _stopInteraction();
     }
-    _txController.value = _makeMatrixInSafeRange(m, forceClamp: true);
-    _stopInteraction();
   }
 
   /// Restrict matrix to the safe range.
@@ -1903,6 +1923,12 @@ class _PdfViewerState extends State<PdfViewer>
     _calcMatrixFor(position, zoom: zoom, viewSize: _viewSize!),
     duration: duration,
   );
+
+  Offset _localPositionToZoomCenter(Offset localPosition, double newZoom) {
+    final toCenter = (_viewSize!.center(Offset.zero) - localPosition) / newZoom;
+    final zoomPosition = _controller!.globalToDocument(_controller!.localToGlobal(localPosition)!)!;
+    return zoomPosition.translate(toCenter.dx, toCenter.dy);
+  }
 
   Offset get _centerPosition => _txController.value.calcPosition(_viewSize!);
 
@@ -3735,19 +3761,82 @@ class PdfViewerController extends ValueListenable<Matrix4> {
   /// This function does not scroll/zoom to the specified page but changes the current page number.
   void setCurrentPageNumber(int pageNumber) => _state._setCurrentPageNumber(pageNumber);
 
+  /// The current zoom ratio.
   double get currentZoom => value.zoom;
 
+  /// Set the zoom ratio with the specified position as the zoom center.
+  ///
+  /// [position] specifies the zoom center in the document coordinates.
+  /// [zoom] specifies the new zoom ratio.
+  /// [duration] specifies the duration of the animation.
   Future<void> setZoom(Offset position, double zoom, {Duration duration = const Duration(milliseconds: 200)}) =>
       _state._setZoom(position, zoom, duration: duration);
 
+  /// Zoom in with the specified position as the zoom center.
+  ///
+  /// [zoomCenter] specifies the zoom center in the document coordinates; if null, the center of the view is used.
+  /// [loop] specifies whether to loop the zoom stops.
+  /// [duration] specifies the duration of the animation.
   Future<void> zoomUp({bool loop = false, Offset? zoomCenter, Duration duration = const Duration(milliseconds: 200)}) =>
       _state._zoomUp(loop: loop, zoomCenter: zoomCenter, duration: duration);
 
+  /// Zoom out with the specified position as the zoom center.
+  ///
+  /// [zoomCenter] specifies the zoom center in the document coordinates; if null, the center of the view is used.
+  /// [loop] specifies whether to loop the zoom stops.
+  /// [duration] specifies the duration of the animation.
   Future<void> zoomDown({
     bool loop = false,
     Offset? zoomCenter,
     Duration duration = const Duration(milliseconds: 200),
   }) => _state._zoomDown(loop: loop, zoomCenter: zoomCenter, duration: duration);
+
+  /// Set the zoom ratio with the document point corresponding to the specified local position is kept unmoved
+  /// on the view.
+  ///
+  /// [localPosition] specifies the position in the widget's local coordinates.
+  /// [newZoom] specifies the new zoom ratio.
+  /// [duration] specifies the duration of the animation.
+  Future<void> zoomOnLocalPosition({
+    required Offset localPosition,
+    required double newZoom,
+    Duration duration = const Duration(milliseconds: 200),
+  }) async {
+    final center = _state._localPositionToZoomCenter(localPosition, newZoom);
+    await _state._setZoom(center, newZoom, duration: duration);
+  }
+
+  /// Zoom in with the document point corresponding to the specified local position is kept unmoved
+  /// on the view.
+  ///
+  /// [localPosition] specifies the position in the widget's local coordinates.
+  /// [loop] specifies whether to loop the zoom stops.
+  /// [duration] specifies the duration of the animation.
+  Future<void> zoomUpOnLocalPosition({
+    required Offset localPosition,
+    bool loop = false,
+    Duration duration = const Duration(milliseconds: 200),
+  }) async {
+    final newZoom = _state._findNextZoomStop(currentZoom, zoomUp: true, loop: loop);
+    final center = _state._localPositionToZoomCenter(localPosition, newZoom);
+    await _state._setZoom(center, newZoom, duration: duration);
+  }
+
+  /// Zoom out with the document point corresponding to the specified local position is kept unmoved
+  /// on the view.
+  ///
+  /// [localPosition] specifies the position in the widget's local coordinates.
+  /// [loop] specifies whether to loop the zoom stops.
+  /// [duration] specifies the duration of the animation.
+  Future<void> zoomDownOnLocalPosition({
+    required Offset localPosition,
+    bool loop = false,
+    Duration duration = const Duration(milliseconds: 200),
+  }) async {
+    final newZoom = _state._findNextZoomStop(currentZoom, zoomUp: false, loop: loop);
+    final center = _state._localPositionToZoomCenter(localPosition, newZoom);
+    await _state._setZoom(center, newZoom, duration: duration);
+  }
 
   RenderBox? get renderBox => _state._renderBox;
 
