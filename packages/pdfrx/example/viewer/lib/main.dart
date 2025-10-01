@@ -307,11 +307,12 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver {
                           },
                         ),
                         keyHandlerParams: PdfViewerKeyHandlerParams(autofocus: true),
-                        // useAlternativeFitScaleAsMinScale: false,
+                        //useAlternativeFitScaleAsMinScale: true,
                         maxScale: 8,
                         fitMode: FitMode.fill,
-                        margin: 5,
-                        boundaryMargin: const EdgeInsets.all(0),
+                        pageDropShadow: null,
+                        margin: 10,
+                        boundaryMargin: const EdgeInsets.all(10),
                         scrollPhysics: PdfViewerParams.getScrollPhysics(context),
                         viewerOverlayBuilder: (context, size, handleLinkTap) => [
                           //
@@ -477,15 +478,28 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver {
   late final List<PdfPageLayoutFunction?> _layoutPages = [
     // The default layout
     null,
-    // Horizontal layout
-    (pages, params) => HorizontalPageLayout.fromPages(pages, params),
-    // Facing pages layout
-    (pages, params) => FacingPagesLayout.fromPages(
+    // Horizontal layout (using built-in layout class)
+    (pages, params, {viewportSize}) => HorizontalPageLayout.fromPages(pages, params, viewportSize: viewportSize),
+    // Facing pages layout (using built-in layout class)
+    (pages, params, {viewportSize}) => FacingPagesLayout.fromPages(
       pages,
       params,
-      needCoverPage: needCoverPage,
+      viewportSize: viewportSize,
+      firstPageIsCoverPage: needCoverPage,
       isRightToLeftReadingOrder: isRightToLeftReadingOrder,
     ),
+    // Custom layout example (backward compatible - no viewportSize needed)
+    // Uncomment to use:
+    // (pages, params) {
+    //   final height = pages.fold(0.0, (prev, page) => max(prev, page.height)) + params.margin * 2;
+    //   final pageLayouts = <Rect>[];
+    //   double x = params.margin;
+    //   for (var page in pages) {
+    //     pageLayouts.add(Rect.fromLTWH(x, (height - page.height) / 2, page.width, page.height));
+    //     x += page.width + params.margin;
+    //   }
+    //   return PdfPageLayout(pageLayouts: pageLayouts, documentSize: Size(x, height));
+    // },
   ];
 
   void _addCurrentSelectionToMarkers(Color color) {

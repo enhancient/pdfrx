@@ -602,9 +602,14 @@ class _PdfViewerState extends State<PdfViewer>
         _calcZoomStopTable();
         final zoom =
             widget.params.calculateInitialZoom?.call(_document!, _controller!, _alternativeFitScale!, _coverScale!) ??
-            _coverScale!;
+            _getInitialZoom();
         await _setZoom(Offset.zero, zoom, duration: Duration.zero);
-        await _goToPage(pageNumber: _pageNumber!, duration: Duration.zero);
+        await _goToPage(
+          pageNumber: _pageNumber!,
+          duration: Duration.zero,
+          maintainCurrentZoom: true,
+          anchor: PdfPageAnchor.topLeft,
+        );
         if (mounted && _document != null && _controller != null) {
           widget.params.onViewerReady?.call(_document!, _controller!);
         }
@@ -906,13 +911,32 @@ class _PdfViewerState extends State<PdfViewer>
       _layout = null;
       return false;
     }
-    final newLayout = (widget.params.layoutPages ?? _layoutPages)(_document!.pages, widget.params);
+    final newLayout = (widget.params.layoutPages ?? _layoutPages)(
+      _document!.pages,
+      widget.params,
+      viewportSize: _viewSize,
+    );
     if (_layout == newLayout) {
       return false;
     }
 
     _layout = newLayout;
     return true;
+  }
+
+  double _getInitialZoom() {
+    if (widget.params.autoMinScale && _viewSize != null && _layout != null) {
+      // Use layout's calculateFitScale method for consistent fitMode behavior
+      final params = widget.params;
+      return _layout!.calculateFitScale(
+        _viewSize!,
+        params.fitMode,
+        boundaryMargin: params.boundaryMargin,
+        margin: params.margin,
+      );
+    }
+    // Fall back to old cover scale behavior
+    return _coverScale!;
   }
 
   void _calcCoverFitScale() {
@@ -945,12 +969,13 @@ class _PdfViewerState extends State<PdfViewer>
     }
     // Calculate minimum scale based on new autoMinScale parameter
     if (widget.params.autoMinScale) {
-      // Use the layout's calculateScale method with current fitMode
-      final bmh = params.boundaryMargin?.horizontal == double.infinity ? 0 : params.boundaryMargin?.horizontal ?? 0;
-      final bmv = params.boundaryMargin?.vertical == double.infinity ? 0 : params.boundaryMargin?.vertical ?? 0;
-      final m2 = params.margin * 2;
-      final adjustedViewSize = Size(_viewSize!.width - bmh - m2, _viewSize!.height - bmv - m2);
-      _minScale = _layout!.calculateScale(adjustedViewSize, params.fitMode);
+      // Use the layout's calculateFitScale method with current fitMode
+      _minScale = _layout!.calculateFitScale(
+        _viewSize!,
+        params.fitMode,
+        boundaryMargin: params.boundaryMargin,
+        margin: params.margin,
+      );
     } else if (!widget.params.useAlternativeFitScaleAsMinScale) {
       // Use explicit minScale parameter
       _minScale = widget.params.minScale;
@@ -963,16 +988,37 @@ class _PdfViewerState extends State<PdfViewer>
   void _calcZoomStopTable() {
     _zoomStops.clear();
     double z;
-    if (_alternativeFitScale != null && !_areZoomsAlmostIdentical(_alternativeFitScale!, _coverScale!)) {
-      if (_alternativeFitScale! < _coverScale!) {
-        _zoomStops.add(_alternativeFitScale!);
-        z = _coverScale!;
+
+    // Use consistent scale calculation when autoMinScale is enabled
+    final double baseScale;
+    final double? alternativeScale;
+
+    if (widget.params.autoMinScale && _viewSize != null && _layout != null) {
+      // Use new layout-based scale calculation
+      final params = widget.params;
+      baseScale = _layout!.calculateFitScale(
+        _viewSize!,
+        params.fitMode,
+        boundaryMargin: params.boundaryMargin,
+        margin: params.margin,
+      );
+      alternativeScale = _alternativeFitScale; // Keep for compatibility, but use new base
+    } else {
+      // Use legacy scale calculation
+      baseScale = _coverScale!;
+      alternativeScale = _alternativeFitScale;
+    }
+
+    if (alternativeScale != null && !_areZoomsAlmostIdentical(alternativeScale, baseScale)) {
+      if (alternativeScale < baseScale) {
+        _zoomStops.add(alternativeScale);
+        z = baseScale;
       } else {
-        _zoomStops.add(_coverScale!);
-        z = _alternativeFitScale!;
+        _zoomStops.add(baseScale);
+        z = alternativeScale;
       }
     } else {
-      z = _coverScale!;
+      z = baseScale;
     }
     // in some case, z may be 0 and it causes infinite loop.
     if (z < 1 / 128) {
@@ -1337,8 +1383,8 @@ class _PdfViewerState extends State<PdfViewer>
     return false;
   }
 
-  PdfPageLayout _layoutPages(List<PdfPage> pages, PdfViewerParams params) {
-    return VerticalPageLayout.fromPages(pages, params);
+  PdfPageLayout _layoutPages(List<PdfPage> pages, PdfViewerParams params, {Size? viewportSize}) {
+    return VerticalPageLayout.fromPages(pages, params, viewportSize: viewportSize);
   }
 
   void _invalidate() => _updateStream.add(_txController.value);
@@ -1513,19 +1559,38 @@ class _PdfViewerState extends State<PdfViewer>
   /// The minimum zoom ratio allowed.
   double get minScale => _minScale;
 
-  Matrix4 _calcMatrixForRect(Rect rect, {double? zoomMax, double? margin}) {
+  Matrix4 _calcMatrixForRect(Rect rect, {double? zoomMax, double? margin, bool maintainCurrentZoom = false}) {
     margin ??= 0;
-    var zoom = min((_viewSize!.width - margin * 2) / rect.width, (_viewSize!.height - margin * 2) / rect.height);
-    if (zoomMax != null && zoom > zoomMax) zoom = zoomMax;
+
+    final double zoom;
+    if (maintainCurrentZoom && _currentZoom > 0) {
+      // Use existing zoom for positioning only
+      zoom = _currentZoom;
+    } else {
+      // Calculate zoom to fit rect
+      var calculatedZoom = min(
+        (_viewSize!.width - margin * 2) / rect.width,
+        (_viewSize!.height - margin * 2) / rect.height,
+      );
+      if (zoomMax != null && calculatedZoom > zoomMax) calculatedZoom = zoomMax;
+      zoom = calculatedZoom;
+    }
+
     return _calcMatrixFor(rect.center, zoom: zoom, viewSize: _viewSize!);
   }
 
-  Matrix4 _calcMatrixForArea({required Rect rect, double? zoomMax, double? margin, PdfPageAnchor? anchor}) =>
-      _calcMatrixForRect(
-        _calcRectForArea(rect: rect, anchor: anchor ?? widget.params.pageAnchor),
-        zoomMax: zoomMax,
-        margin: margin,
-      );
+  Matrix4 _calcMatrixForArea({
+    required Rect rect,
+    double? zoomMax,
+    double? margin,
+    PdfPageAnchor? anchor,
+    bool maintainCurrentZoom = false,
+  }) => _calcMatrixForRect(
+    _calcRectForArea(rect: rect, anchor: anchor ?? widget.params.pageAnchor),
+    zoomMax: zoomMax,
+    margin: margin,
+    maintainCurrentZoom: maintainCurrentZoom,
+  );
 
   /// The function calculate the rectangle which should be shown in the view.
   ///
@@ -1566,14 +1631,24 @@ class _PdfViewerState extends State<PdfViewer>
     }
   }
 
-  Matrix4 _calcMatrixForPage({required int pageNumber, PdfPageAnchor? anchor}) {
+  Matrix4 _calcMatrixForPage({
+    required int pageNumber,
+    PdfPageAnchor? anchor,
+    double? zoomMax,
+    bool maintainCurrentZoom = false,
+  }) {
     final boundaryMargin = _adjustedBoundaryMargins;
     final pageRect = _layout!.pageLayouts[pageNumber - 1].inflate(widget.params.margin);
 
     // If boundaryMargin is infinite, don't inflate the rect
     final targetRect = boundaryMargin.inflateRectIfFinite(pageRect);
 
-    return _calcMatrixForArea(rect: targetRect, anchor: anchor, zoomMax: _currentZoom);
+    return _calcMatrixForArea(
+      rect: targetRect,
+      anchor: anchor,
+      zoomMax: zoomMax ?? _currentZoom,
+      maintainCurrentZoom: maintainCurrentZoom,
+    );
   }
 
   Rect _calcRectForRectInsidePage({required int pageNumber, required PdfRect rect}) {
@@ -1725,6 +1800,7 @@ class _PdfViewerState extends State<PdfViewer>
     required int pageNumber,
     PdfPageAnchor? anchor,
     Duration duration = const Duration(milliseconds: 200),
+    bool maintainCurrentZoom = false,
   }) async {
     final pageCount = _document!.pages.length;
     final int targetPageNumber;
@@ -1740,7 +1816,7 @@ class _PdfViewerState extends State<PdfViewer>
 
     await _goTo(
       _calcMatrixForClampedToNearestBoundary(
-        _calcMatrixForPage(pageNumber: targetPageNumber, anchor: anchor),
+        _calcMatrixForPage(pageNumber: targetPageNumber, anchor: anchor, maintainCurrentZoom: maintainCurrentZoom),
         viewSize: _viewSize!,
       ),
       duration: duration,
@@ -3311,323 +3387,16 @@ enum FitMode {
   none,
 }
 
-/// Helper class to hold layout calculation results.
-class LayoutResult {
-  LayoutResult({required this.pageLayouts, required this.documentSize});
-  final List<Rect> pageLayouts;
-  final Size documentSize;
-}
+/// Defines how pages transition when navigating through the document.
+enum PageTransition {
+  /// Pages flow continuously in an uninterrupted scrollable view.
+  /// Similar to browsing a webpage - all pages are laid out sequentially.
+  continuous,
 
-/// Helper class to hold facing pages layout calculation results.
-class FacingPagesLayoutResult {
-  FacingPagesLayoutResult({
-    required this.pageLayouts,
-    required this.documentSize,
-    required this.leftPageWidth,
-    required this.rightPageWidth,
-    required this.gutter,
-  });
-  final List<Rect> pageLayouts;
-  final Size documentSize;
-  final double leftPageWidth;
-  final double rightPageWidth;
-  final double gutter;
-}
-
-/// Defines page layout.
-abstract class PdfPageLayout {
-  PdfPageLayout({required this.pageLayouts, required this.documentSize});
-
-  final List<Rect> pageLayouts;
-  final Size documentSize;
-
-  /// Each layout implements its own calculation logic.
-  LayoutResult layoutBuilder(List<PdfPage> pages, PdfViewerParams params);
-
-  /// Layout knows its primary scroll axis.
-  Axis get primaryAxis;
-
-  /// Gets the maximum page width across all pages.
-  double getMaxPageWidth() {
-    return pageLayouts.fold(0.0, (maximum, rect) => max(maximum, rect.width));
-  }
-
-  /// Gets the maximum page height across all pages.
-  double getMaxPageHeight() {
-    return pageLayouts.fold(0.0, (maximum, rect) => max(maximum, rect.height));
-  }
-
-  /// Calculate scale based on viewport size and fit mode.
-  double calculateScale(Size viewportSize, FitMode mode) {
-    final maxPageWidth = getMaxPageWidth();
-    final maxPageHeight = getMaxPageHeight();
-
-    switch (mode) {
-      case FitMode.fit:
-        // Entire content visible
-        return min(viewportSize.width / maxPageWidth, viewportSize.height / maxPageHeight);
-
-      case FitMode.fill:
-        // Fill viewport, crop perpendicular to scroll
-        if (primaryAxis == Axis.vertical) {
-          // Vertical scroll - fit width, crop height if needed
-          return viewportSize.width / maxPageWidth;
-        } else {
-          // Horizontal scroll - fit height, crop width if needed
-          return viewportSize.height / maxPageHeight;
-        }
-      case FitMode.none:
-        // No scaling
-        return 1.0;
-    }
-  }
-
-  @override
-  bool operator ==(Object other) {
-    if (identical(this, other)) return true;
-    if (other is! PdfPageLayout) return false;
-    return listEquals(pageLayouts, other.pageLayouts) && documentSize == other.documentSize;
-  }
-
-  @override
-  int get hashCode => pageLayouts.hashCode ^ documentSize.hashCode;
-}
-
-/// Vertical page layout implementation.
-class VerticalPageLayout extends PdfPageLayout {
-  VerticalPageLayout({required super.pageLayouts, required super.documentSize});
-
-  /// Create a vertical layout from pages and parameters.
-  factory VerticalPageLayout.fromPages(List<PdfPage> pages, PdfViewerParams params) {
-    final layout = VerticalPageLayout(pageLayouts: [], documentSize: Size.zero);
-    final result = layout.layoutBuilder(pages, params);
-    return VerticalPageLayout(pageLayouts: result.pageLayouts, documentSize: result.documentSize);
-  }
-
-  @override
-  Axis get primaryAxis => Axis.vertical;
-
-  @override
-  LayoutResult layoutBuilder(List<PdfPage> pages, PdfViewerParams params) {
-    if (params.fitMode == FitMode.fill) {
-      // For fill mode, each page scales to fill width
-      final maxWidth = pages.fold(0.0, (w, p) => max(w, p.width));
-      final width = maxWidth + params.margin * 2;
-
-      final pageLayouts = <Rect>[];
-      var y = params.margin;
-      for (var i = 0; i < pages.length; i++) {
-        final page = pages[i];
-        // Each page scales to fill available width
-        final rect = Rect.fromLTWH(params.margin, y, maxWidth, page.height * (maxWidth / page.width));
-        pageLayouts.add(rect);
-        y += rect.height + params.margin;
-      }
-
-      return LayoutResult(pageLayouts: pageLayouts, documentSize: Size(width, y));
-    } else {
-      // For fit mode, use original behavior - all pages fit within same width
-      final width = pages.fold(0.0, (w, p) => max(w, p.width)) + params.margin * 2;
-
-      final pageLayouts = <Rect>[];
-      var y = params.margin;
-      for (var i = 0; i < pages.length; i++) {
-        final page = pages[i];
-        final rect = Rect.fromLTWH((width - page.width) / 2, y, page.width, page.height);
-        pageLayouts.add(rect);
-        y += page.height + params.margin;
-      }
-
-      return LayoutResult(pageLayouts: pageLayouts, documentSize: Size(width, y));
-    }
-  }
-
-  @override
-  double calculateScale(Size viewportSize, FitMode mode) {
-    if (mode == FitMode.fill) {
-      // For vertical scrolling, fill width
-      // User can scroll to see cropped height
-      return viewportSize.width / getMaxPageWidth();
-    } else {
-      // Fit mode - everything visible
-      return super.calculateScale(viewportSize, mode);
-    }
-  }
-}
-
-/// Horizontal page layout implementation.
-class HorizontalPageLayout extends PdfPageLayout {
-  HorizontalPageLayout({required super.pageLayouts, required super.documentSize});
-
-  /// Create a horizontal layout from pages and parameters.
-  factory HorizontalPageLayout.fromPages(List<PdfPage> pages, PdfViewerParams params) {
-    final layout = HorizontalPageLayout(pageLayouts: [], documentSize: Size.zero);
-    final result = layout.layoutBuilder(pages, params);
-    return HorizontalPageLayout(pageLayouts: result.pageLayouts, documentSize: result.documentSize);
-  }
-
-  @override
-  Axis get primaryAxis => Axis.horizontal;
-
-  @override
-  LayoutResult layoutBuilder(List<PdfPage> pages, PdfViewerParams params) {
-    if (params.fitMode == FitMode.fill) {
-      // For fill mode, each page scales to fill height - use individual page heights
-      final maxHeight = pages.fold(0.0, (prev, page) => max(prev, page.height));
-      final height = maxHeight + params.margin * 2;
-
-      final pageLayouts = <Rect>[];
-      var x = params.margin;
-      for (var page in pages) {
-        // Each page scales to fill available height
-        final rect = Rect.fromLTWH(x, params.margin, page.width * (maxHeight / page.height), maxHeight);
-        pageLayouts.add(rect);
-        x += rect.width + params.margin;
-      }
-      return LayoutResult(pageLayouts: pageLayouts, documentSize: Size(x, height));
-    } else {
-      // For fit mode, use original behavior - all pages fit within same height
-      final height = pages.fold(0.0, (prev, page) => max(prev, page.height)) + params.margin * 2;
-      final pageLayouts = <Rect>[];
-      var x = params.margin;
-      for (var page in pages) {
-        pageLayouts.add(
-          Rect.fromLTWH(
-            x,
-            (height - page.height) / 2, // center vertically
-            page.width,
-            page.height,
-          ),
-        );
-        x += page.width + params.margin;
-      }
-      return LayoutResult(pageLayouts: pageLayouts, documentSize: Size(x, height));
-    }
-  }
-
-  @override
-  double calculateScale(Size viewportSize, FitMode mode) {
-    if (mode == FitMode.fill) {
-      // For horizontal scrolling, fill height
-      // User can scroll to see cropped width
-      return viewportSize.height / getMaxPageHeight();
-    } else {
-      return super.calculateScale(viewportSize, mode);
-    }
-  }
-}
-
-/// Facing pages layout implementation with intelligent aspect ratio handling.
-class FacingPagesLayout extends PdfPageLayout {
-  FacingPagesLayout({
-    required super.pageLayouts,
-    required super.documentSize,
-    required this.leftPageWidth,
-    required this.rightPageWidth,
-    required this.gutter,
-  });
-
-  /// Create a facing pages layout from pages and parameters.
-  factory FacingPagesLayout.fromPages(
-    List<PdfPage> pages,
-    PdfViewerParams params, {
-    bool needCoverPage = false,
-    bool isRightToLeftReadingOrder = false,
-  }) {
-    final layout = FacingPagesLayout(
-      pageLayouts: [],
-      documentSize: Size.zero,
-      leftPageWidth: 0,
-      rightPageWidth: 0,
-      gutter: 0,
-    );
-    final result = layout.layoutBuilderWithOptions(pages, params, needCoverPage, isRightToLeftReadingOrder);
-    return FacingPagesLayout(
-      pageLayouts: result.pageLayouts,
-      documentSize: result.documentSize,
-      leftPageWidth: result.leftPageWidth,
-      rightPageWidth: result.rightPageWidth,
-      gutter: result.gutter,
-    );
-  }
-
-  final double leftPageWidth;
-  final double rightPageWidth;
-  final double gutter;
-
-  @override
-  Axis get primaryAxis => Axis.vertical; // Typically vertical for facing pages
-
-  @override
-  LayoutResult layoutBuilder(List<PdfPage> pages, PdfViewerParams params) {
-    // For the base layoutBuilder, use default parameters
-    final result = layoutBuilderWithOptions(pages, params, false, false);
-    return LayoutResult(pageLayouts: result.pageLayouts, documentSize: result.documentSize);
-  }
-
-  /// Calculate facing pages layout arrangement with additional options.
-  FacingPagesLayoutResult layoutBuilderWithOptions(
-    List<PdfPage> pages,
-    PdfViewerParams params,
-    bool needCoverPage,
-    bool isRightToLeftReadingOrder,
-  ) {
-    final width = pages.fold(0.0, (prev, page) => max(prev, page.width));
-    final pageLayouts = <Rect>[];
-    final offset = needCoverPage ? 1 : 0;
-    var y = params.margin;
-
-    for (var i = 0; i < pages.length; i++) {
-      final page = pages[i];
-      final pos = i + offset;
-      final isLeft = isRightToLeftReadingOrder ? (pos & 1) == 1 : (pos & 1) == 0;
-
-      final otherSide = (pos ^ 1) - offset;
-      final h = 0 <= otherSide && otherSide < pages.length ? max(page.height, pages[otherSide].height) : page.height;
-
-      pageLayouts.add(
-        Rect.fromLTWH(
-          isLeft ? width + params.margin - page.width : params.margin * 2 + width,
-          y + (h - page.height) / 2,
-          page.width,
-          page.height,
-        ),
-      );
-      if (pos & 1 == 1 || i + 1 == pages.length) {
-        y += h + params.margin;
-      }
-    }
-
-    return FacingPagesLayoutResult(
-      pageLayouts: pageLayouts,
-      documentSize: Size((params.margin + width) * 2 + params.margin, y),
-      leftPageWidth: width,
-      rightPageWidth: width,
-      gutter: params.margin,
-    );
-  }
-
-  @override
-  double calculateScale(Size viewportSize, FitMode mode) {
-    final spreadWidth = leftPageWidth + rightPageWidth + gutter;
-
-    if (mode == FitMode.fill) {
-      // For facing pages, intelligent decision based on aspect ratio
-      final spreadAspect = spreadWidth / getMaxPageHeight();
-      final viewAspect = viewportSize.width / viewportSize.height;
-
-      if (viewAspect > spreadAspect) {
-        // Viewport is wider - fill height
-        return viewportSize.height / getMaxPageHeight();
-      } else {
-        // Viewport is taller - fill width
-        return viewportSize.width / spreadWidth;
-      }
-    } else {
-      // Fit - show entire spread
-      return min(viewportSize.width / spreadWidth, viewportSize.height / getMaxPageHeight());
-    }
-  }
+  /// Pages transition individually (one page or pair in facing pages) at a time.
+  /// Navigation jumps between distinct page boundaries.
+  /// Note this is a placeholder - this mode is not yet been implemented.
+  discrete,
 }
 
 /// Represents the result of the hit test on the page.

@@ -19,6 +19,7 @@ class PdfViewerParams {
     this.layoutPages,
     this.normalizeMatrix,
     this.fitMode = FitMode.fit,
+    this.pageTransition = PageTransition.continuous,
     this.maxScale = 8.0,
     this.minScale = 0.1,
     this.autoMinScale = true,
@@ -148,6 +149,14 @@ class PdfViewerParams {
   ///
   /// The default is [FitMode.fit].
   final FitMode fitMode;
+
+  /// Defines how pages transition when navigating through the document.
+  ///
+  /// - [PageTransition.continuous]: Pages flow continuously in an uninterrupted scrollable view
+  /// - [PageTransition.discrete]: Pages transition discretely, one spread at a time
+  ///
+  /// The default is [PageTransition.continuous].
+  final PageTransition pageTransition;
 
   /// The maximum allowed scale.
   ///
@@ -1199,7 +1208,8 @@ typedef PdfViewerGetPageRenderingScale =
 /// - [pages] is the list of pages.
 ///   This is just a copy of the first loaded page of the document.
 /// - [params] is the viewer parameters.
-typedef PdfPageLayoutFunction = PdfPageLayout Function(List<PdfPage> pages, PdfViewerParams params);
+typedef PdfPageLayoutFunction =
+    PdfPageLayout Function(List<PdfPage> pages, PdfViewerParams params, {Size? viewportSize});
 
 /// Function to normalize the matrix.
 ///
