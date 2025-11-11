@@ -2279,7 +2279,11 @@ class _PdfViewerState extends State<PdfViewer>
       }
 
       late double left, top;
-      final rect0 = textAnchor.rect;
+
+      final rect0 = _documentToRenderBox(textAnchor.rect, renderBox);
+      if (rect0 == null) {
+        return null;
+      }
       final rect1 = anchorLocalRect;
       final pt = rect0.center;
       final rectTop = rect1 == null ? rect0.top : min(rect0.top, rect1.top);
