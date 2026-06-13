@@ -1162,7 +1162,16 @@ class _PdfViewerState extends State<PdfViewer>
       _layout = null;
       return false;
     }
-    final newLayout = (widget.params.layoutPages ?? _layoutPages)(_document!.pages, widget.params);
+    // Dispatch precedence: params.layout (value-type strategy) → params.layoutPages
+    // (closure) → built-in default. The viewport is passed to resolve() at call time
+    // and never stored on the strategy, so a resize relayouts without equality churn.
+    final newLayout =
+        widget.params.layout?.resolve(
+          pages: _document!.pages,
+          viewport: _viewSize ?? Size.zero,
+          params: widget.params,
+        ) ??
+        (widget.params.layoutPages ?? _layoutPages)(_document!.pages, widget.params);
     if (_layout == newLayout) {
       return false;
     }

@@ -8,6 +8,7 @@ import 'package:pdfrx_engine/pdfrx_engine.dart';
 import '../pdf_document_ref.dart';
 import '../utils/fixed_overscroll_physics.dart';
 import '../utils/platform.dart';
+import 'layout/pdf_layout.dart';
 import 'pdf_viewer.dart';
 import 'pdf_viewer_scroll_thumb.dart';
 import 'scroll_interaction/pdf_viewer_scroll_interaction_delegate.dart';
@@ -27,6 +28,7 @@ class PdfViewerParams {
   const PdfViewerParams({
     this.margin = 8.0,
     this.backgroundColor = Colors.grey,
+    this.layout,
     this.layoutPages,
     this.normalizeMatrix,
     @Deprecated('Use sizeDelegateProvider: PdfViewerSizeDelegateProviderLegacy(maxScale: ...) instead') this.maxScale,
@@ -115,6 +117,19 @@ class PdfViewerParams {
 
   /// Background color of the viewer.
   final Color backgroundColor;
+
+  /// Declarative, value-type strategy that computes page geometry.
+  ///
+  /// This is the value-type successor to [layoutPages]. When non-null it takes
+  /// precedence over [layoutPages] and the built-in default; dispatch order at the
+  /// layout call site is `layout.resolve(...)` → [layoutPages] → built-in default.
+  ///
+  /// Unlike [layoutPages] (a closure, which cannot participate in [PdfViewerParams]
+  /// equality), a [PdfLayout] is a value type with correct `==`/`hashCode`, so changing
+  /// it relayouts automatically without a manual [PdfViewerController.invalidate]. The
+  /// viewport is supplied to [PdfLayout.resolve] at call time and is never stored on the
+  /// strategy, so a viewport resize relayouts without any equality churn.
+  final PdfLayout? layout;
 
   /// Function to customize the layout of the pages.
   ///
@@ -719,6 +734,7 @@ class PdfViewerParams {
         forceReload ||
         other.margin != margin ||
         other.backgroundColor != backgroundColor ||
+        other.layout != layout ||
         // ignore: deprecated_member_use_from_same_package
         other.maxScale != maxScale ||
         // ignore: deprecated_member_use_from_same_package
@@ -763,6 +779,7 @@ class PdfViewerParams {
 
     return other.margin == margin &&
         other.backgroundColor == backgroundColor &&
+        other.layout == layout &&
         // ignore: deprecated_member_use_from_same_package
         other.maxScale == maxScale &&
         // ignore: deprecated_member_use_from_same_package
@@ -834,6 +851,7 @@ class PdfViewerParams {
   int get hashCode {
     return margin.hashCode ^
         backgroundColor.hashCode ^
+        layout.hashCode ^
         // ignore: deprecated_member_use_from_same_package
         maxScale.hashCode ^
         // ignore: deprecated_member_use_from_same_package
