@@ -1189,6 +1189,7 @@ class _PdfViewerState extends State<PdfViewer>
       pageNumber: pageNumber,
       pageMargin: widget.params.margin,
       boundaryMargin: widget.params.boundaryMargin,
+      fitMode: widget.params.fitMode,
     );
   }
 

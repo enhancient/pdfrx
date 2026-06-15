@@ -8,6 +8,7 @@ import 'package:pdfrx_engine/pdfrx_engine.dart';
 import '../pdf_document_ref.dart';
 import '../utils/fixed_overscroll_physics.dart';
 import '../utils/platform.dart';
+import 'layout/fit_mode.dart';
 import 'layout/pdf_layout.dart';
 import 'pdf_viewer.dart';
 import 'pdf_viewer_scroll_thumb.dart';
@@ -29,6 +30,7 @@ class PdfViewerParams {
     this.margin = 8.0,
     this.backgroundColor = Colors.grey,
     this.layout,
+    this.fitMode = PdfFitMode.none,
     this.layoutPages,
     this.normalizeMatrix,
     @Deprecated('Use sizeDelegateProvider: PdfViewerSizeDelegateProviderLegacy(maxScale: ...) instead') this.maxScale,
@@ -130,6 +132,17 @@ class PdfViewerParams {
   /// viewport is supplied to [PdfLayout.resolve] at call time and is never stored on the
   /// strategy, so a viewport resize relayouts without any equality churn.
   final PdfLayout? layout;
+
+  /// How pages are fitted within the viewport.
+  ///
+  /// A top-level, orthogonal axis consulted by [layout] strategies (and, for
+  /// [PdfFitMode.cover], by the size delegate). `SequentialPagesLayout` bakes
+  /// [PdfFitMode.none]/[PdfFitMode.fill]/[PdfFitMode.fit] into geometry; [PdfFitMode.cover]
+  /// keeps native geometry and relies on the delegate's cover scale.
+  ///
+  /// Has no effect on the built-in default layout or a [layoutPages] closure, which do
+  /// not consult it. Defaults to [PdfFitMode.none].
+  final PdfFitMode fitMode;
 
   /// Function to customize the layout of the pages.
   ///
@@ -735,6 +748,7 @@ class PdfViewerParams {
         other.margin != margin ||
         other.backgroundColor != backgroundColor ||
         other.layout != layout ||
+        other.fitMode != fitMode ||
         // ignore: deprecated_member_use_from_same_package
         other.maxScale != maxScale ||
         // ignore: deprecated_member_use_from_same_package
@@ -780,6 +794,7 @@ class PdfViewerParams {
     return other.margin == margin &&
         other.backgroundColor == backgroundColor &&
         other.layout == layout &&
+        other.fitMode == fitMode &&
         // ignore: deprecated_member_use_from_same_package
         other.maxScale == maxScale &&
         // ignore: deprecated_member_use_from_same_package
@@ -852,6 +867,7 @@ class PdfViewerParams {
     return margin.hashCode ^
         backgroundColor.hashCode ^
         layout.hashCode ^
+        fitMode.hashCode ^
         // ignore: deprecated_member_use_from_same_package
         maxScale.hashCode ^
         // ignore: deprecated_member_use_from_same_package

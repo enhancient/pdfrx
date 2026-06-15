@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/rendering.dart';
 import 'package:pdfrx_engine/pdfrx_engine.dart';
 
+import '../layout/fit_mode.dart';
 import '../pdf_viewer.dart';
 import '../pdf_viewer_layout_metrics.dart';
 import '../pdf_viewer_params.dart';
@@ -171,6 +172,7 @@ class PdfViewerSizeDelegateSmart implements PdfViewerSizeDelegate {
     required int? pageNumber,
     required double pageMargin,
     required EdgeInsets? boundaryMargin,
+    PdfFitMode fitMode = PdfFitMode.none,
   }) {
     // Reuse the legacy math for geometric limits (coverScale/alternativeFitScale)
     // We can delegate this calculation or duplicate the math (it's purely geometric).
@@ -196,19 +198,21 @@ class PdfViewerSizeDelegateSmart implements PdfViewerSizeDelegate {
       }
     }
 
-    // Smart Policy for Min Scale:
-    // 1. Calculate "Fit Page" scale (fallback to coverScale if page not found)
-    final fitPageScale = alternativeFitScale ?? coverScale;
-
-    // 2. Adjust for multi-page visibility
-    // If maxPagesVisible is 1.0, this is Fit Page.
-    // If maxPagesVisible is 2.0, we allow zooming out 2x further.
-    // If maxPagesVisible is infinity, this becomes 0.
-    final allowedMinScale = fitPageScale / _maxPagesVisible;
-
-    // 3. The minimum scale is whichever is larger: the hard configuration or the physical fit.
-    // This prevents zooming out further than the page size.
-    final effectiveMinScale = math.max(_minScale, allowedMinScale);
+    // Smart Policy for Min Scale, floored by the active fit mode.
+    final double effectiveMinScale;
+    switch (fitMode) {
+      case PdfFitMode.fill:
+      case PdfFitMode.cover:
+        // Fit-width / cover: floor at coverScale; don't let multi-page zoom-out pillarbox.
+        effectiveMinScale = math.max(_minScale, coverScale);
+      case PdfFitMode.fit:
+      case PdfFitMode.none:
+        // Fit Page (fallback to coverScale if page not found), allowing zoom-out up to
+        // maxPagesVisible. Unchanged smart behavior.
+        final fitPageScale = alternativeFitScale ?? coverScale;
+        final allowedMinScale = fitPageScale / _maxPagesVisible;
+        effectiveMinScale = math.max(_minScale, allowedMinScale);
+    }
 
     return PdfViewerLayoutMetrics(
       minScale: effectiveMinScale,
