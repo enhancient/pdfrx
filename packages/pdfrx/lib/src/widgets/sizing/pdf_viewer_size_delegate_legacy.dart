@@ -6,6 +6,7 @@ import 'package:pdfrx_engine/pdfrx_engine.dart';
 import 'package:vector_math/vector_math_64.dart' as vec;
 
 import '../layout/fit_mode.dart';
+import '../layout/pdf_spread_layout.dart';
 import '../pdf_viewer.dart';
 import '../pdf_viewer_layout_metrics.dart';
 import '../pdf_viewer_params.dart';
@@ -174,7 +175,10 @@ class PdfViewerSizeDelegateLegacy implements PdfViewerSizeDelegate {
       coverScale = math.max(s1, s2);
     }
     if (pageNumber != null && pageNumber >= 1 && pageNumber <= layout!.pageLayouts.length) {
-      final rect = layout.pageLayouts[pageNumber - 1];
+      // For facing/spread layouts, fit the whole spread, not a single (half-spread) page.
+      final rect = layout is PdfSpreadLayout
+          ? (layout.spreadBoundsOfPage(pageNumber) ?? layout.pageLayouts[pageNumber - 1])
+          : layout.pageLayouts[pageNumber - 1];
       final m2 = pageMargin * 2;
       alternativeFitScale = math.min(
         (viewSize.width) / (rect.width + bmh + m2),

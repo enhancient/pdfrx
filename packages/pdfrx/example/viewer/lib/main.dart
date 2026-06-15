@@ -311,7 +311,11 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver, Single
                         // Declarative value-type layout. When non-null it takes
                         // precedence over layoutPages
                         layout: isDeclarativeLayout
-                            ? const SequentialPagesLayout(scrollDirection: Axis.vertical)
+                            ? const FacingPagesLayout(
+                                firstPageIsCoverPage: true,
+                                isRightToLeftReadingOrder: false,
+                                singlePagesFillAvailableWidth: true,
+                              )
                             : null,
                         fitMode: isDeclarativeLayout ? PdfFitMode.fit : PdfFitMode.none,
                         layoutPages: _layoutPages[_layoutTypeIndex],

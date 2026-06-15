@@ -73,4 +73,35 @@ void main() {
       expect(_metrics(delegate, PdfFitMode.fill).minScale, 1.0);
     });
   });
+
+  group('spread-aware fit (fit the whole spread, not a half-spread page)', () {
+    // A facing spread 416 wide made of two 204-wide pages; viewport 432×1000, margin 8.
+    final spread = PdfSpreadLayout(
+      pageLayouts: [const Rect.fromLTWH(8, 8, 204, 200), const Rect.fromLTWH(220, 8, 204, 200)],
+      documentSize: const Size(432, 216),
+      spreadBounds: [const Rect.fromLTWH(8, 8, 416, 200)],
+      pageToSpread: [0, 0],
+    );
+
+    PdfViewerLayoutMetrics metrics(PdfViewerSizeDelegate d) => d.calculateMetrics(
+      viewSize: const Size(432, 1000),
+      layout: spread,
+      pageNumber: 1,
+      pageMargin: 8,
+      boundaryMargin: null,
+      fitMode: PdfFitMode.fit,
+    );
+
+    test('legacy fit-page uses the spread width (1.0), not the page width (~1.96)', () {
+      final m = metrics(const PdfViewerSizeDelegateProviderLegacy().create());
+      // min(432/(416+16), 1000/(200+16)) = min(1.0, 4.63) = 1.0; a half-page would give ~1.96.
+      expect(m.alternativeFitScale, closeTo(1.0, 1e-9));
+      expect(m.minScale, closeTo(1.0, 1e-9));
+    });
+
+    test('smart fit-page also fits the spread', () {
+      final m = metrics(const PdfViewerSizeDelegateProviderSmart().create());
+      expect(m.alternativeFitScale, closeTo(1.0, 1e-9));
+    });
+  });
 }
