@@ -94,6 +94,8 @@ class InteractiveViewer extends StatefulWidget {
     this.scrollPhysicsScale,
     this.scrollPhysicsAutoAdjustBoundaries = true,
     this.boundaryProvider,
+    this.routeTrackpadScrollToWheelDelta = false,
+    this.constrainPinch = false,
   }) : assert(minScale > 0),
        assert(interactionEndFrictionCoefficient > 0),
        assert(minScale.isFinite),
@@ -144,6 +146,8 @@ class InteractiveViewer extends StatefulWidget {
     this.scrollPhysicsScale,
     this.scrollPhysicsAutoAdjustBoundaries = true,
     this.boundaryProvider,
+    this.routeTrackpadScrollToWheelDelta = false,
+    this.constrainPinch = false,
   }) : assert(minScale > 0),
        assert(interactionEndFrictionCoefficient > 0),
        assert(minScale.isFinite),
@@ -209,6 +213,20 @@ class InteractiveViewer extends StatefulWidget {
   /// returned rect replaces the margin-inflated child rect in the per-frame clamp, reusing
   /// the existing scroll-physics/bounce/fling. When null (the default) behaviour is unchanged.
   final BoundaryProvider? boundaryProvider;
+
+  /// When true, trackpad scroll (delivered as a [PointerScrollEvent] with
+  /// [PointerDeviceKind.trackpad], chiefly on web) is forwarded to [onWheelDelta] like a mouse
+  /// wheel, instead of being applied as a direct pan. Discrete (page-at-a-time) mode sets this so
+  /// the host can interpret trackpad scroll as page navigation; the default (false) keeps the
+  /// built-in trackpad pan.
+  final bool routeTrackpadScrollToWheelDelta;
+
+  /// When true, the focal-point translation during a pinch is clamped to the content bounds (the
+  /// same clamp the scale snap-back uses) instead of allowing arbitrary scroll-physics overscroll.
+  /// This keeps a single, consistent boundary authority across the pinch and its snap-back, so the
+  /// content cannot be pinched off-bounds and snapped back. The scale itself still overshoots
+  /// min/max and snaps back. Used on desktop; the default (false) keeps the free-pinch behaviour.
+  final bool constrainPinch;
 
   /// Builds the child of this widget.
   ///
@@ -635,10 +653,15 @@ class InteractiveViewerState extends State<InteractiveViewer> with TickerProvide
       // enabling us to go out of boundaries, so we apply physics to the translation.
       if (overscrollX == 0 && overscrollY == 0) {
         if (_gestureType == _GestureType.scale) {
-          // TODO: better handle pan offsets when pinch zooming - for now, don't apply
-          // physics as it introduces issues around the snapback animation position
-          // due to an incorrect focal point, as well as causing undesired zoom behavior
-          // such as when zooming out at the bottom of a document
+          // Constrain the focal-point translation to the content bounds instead of allowing
+          // arbitrary overscroll during the pinch. Uses the same clamp as the snap-back, so there
+          // is a single consistent boundary authority and the content can't be pinched off-bounds.
+          if (widget.constrainPinch) {
+            return _matrixClamp(nextMatrix);
+          }
+          // Otherwise (mobile / free pinch): don't apply physics to the pan during scale — it
+          // introduces issues around the snap-back position due to an incorrect focal point, as
+          // well as undesired zoom behavior such as when zooming out at the bottom of a document.
           return nextMatrix;
         }
         // Check if the offset is accepted by the ScrollPhysics, and so apply it.
@@ -978,6 +1001,15 @@ class InteractiveViewerState extends State<InteractiveViewer> with TickerProvide
       return;
     }
 
+    // A discrete page transition (committed during onInteractionEnd above) is about to drive the
+    // matrix itself; do not start a competing inertia/bounce ballistic, which would overshoot the
+    // target unit. Cleared per gesture so normal flinging is unaffected.
+    if (_suppressNextBallistic) {
+      _suppressNextBallistic = false;
+      _currentAxis = null;
+      return;
+    }
+
     switch (_gestureType) {
       case _GestureType.pan:
         if (widget.scrollPhysics != null) {
@@ -1055,7 +1087,40 @@ class InteractiveViewerState extends State<InteractiveViewer> with TickerProvide
           // even if the the scale doesn't change, we may be out of bounds, and
           // want to animate the snap back to bounds
           _snapStartMatrix = _transformer.value.clone();
-          final pivotScene = _transformer.toScene(_snapFocalPoint);
+          // Snap pivot. Normally the focal point. But for a constrained pinch the view was clamped
+          // (not focal-tracked), so scaling about the focal would introduce a scroll the bounds
+          // permit (a pinned edge drifts off-screen). Instead anchor each axis independently to
+          // whichever document edge it is pinned to (so it works for vertical and horizontal
+          // documents alike); an axis that is free in the middle keeps the focal point.
+          var pivotScreen = _snapFocalPoint;
+          if (widget.constrainPinch) {
+            final startPb = _computePanBoundaries(
+              viewportSize: _viewport.size,
+              scale: endScale,
+              boundaryMargin: widget.boundaryMargin,
+            );
+            final startT = _getMatrixTranslation(_snapStartMatrix);
+            final minX = math.min(-startPb.left, -startPb.right);
+            final maxX = math.max(-startPb.left, -startPb.right);
+            final minY = math.min(-startPb.top, -startPb.bottom);
+            final maxY = math.max(-startPb.top, -startPb.bottom);
+            final pivotX = (startT.dx - maxX).abs() < 1.0
+                ? _viewport
+                      .left // pinned to the document left / start
+                : (startT.dx - minX).abs() < 1.0
+                ? _viewport
+                      .right // pinned to the document right / end
+                : _snapFocalPoint.dx;
+            final pivotY = (startT.dy - maxY).abs() < 1.0
+                ? _viewport
+                      .top // pinned to the document top
+                : (startT.dy - minY).abs() < 1.0
+                ? _viewport
+                      .bottom // pinned to the document bottom
+                : _snapFocalPoint.dy;
+            pivotScreen = Offset(pivotX, pivotY);
+          }
+          final pivotScene = _transformer.toScene(pivotScreen);
           final endMatrix = _snapStartMatrix.clone()
             ..translateByDouble(pivotScene.dx, pivotScene.dy, 0, 1)
             ..scaleByDouble(clampedScale / endScale, clampedScale / endScale, clampedScale / endScale, 1)
@@ -1108,6 +1173,12 @@ class InteractiveViewerState extends State<InteractiveViewer> with TickerProvide
     final double scaleChange;
     if (event is PointerScrollEvent) {
       if (event.kind == PointerDeviceKind.trackpad && !widget.trackpadScrollCausesScale) {
+        // Discrete mode interprets trackpad scroll as page navigation, not a pan: hand it to the
+        // host's onWheelDelta (same path as a mouse wheel) instead of moving the matrix here.
+        if (widget.routeTrackpadScrollToWheelDelta && widget.onWheelDelta != null) {
+          widget.onWheelDelta!(event);
+          return;
+        }
         // Trackpad scroll, so treat it as a pan.
         widget.onInteractionStart?.call(ScaleStartDetails(focalPoint: global, localFocalPoint: local));
 
@@ -1484,9 +1555,24 @@ class InteractiveViewerState extends State<InteractiveViewer> with TickerProvide
     }
   }
 
+  /// When set, the next [_onScaleEnd] skips creating its inertia/bounce ballistic. Used by a
+  /// caller (e.g. discrete page transitions) that takes over the matrix on gesture end and does
+  /// not want the InteractiveViewer's own fling competing with it. Self-clearing per gesture.
+  bool _suppressNextBallistic = false;
+
+  /// Suppress the ballistic the InteractiveViewer would otherwise start on the current gesture's
+  /// end. Must be called *during* the [InteractiveViewer.onInteractionEnd] callback (before
+  /// [_onScaleEnd] decides to fling), which is exactly when a discrete transition commits.
+  void suppressNextBallistic() => _suppressNextBallistic = true;
+
   /// Check if any animations are currently active
   bool get hasActiveAnimations =>
       _controller.isAnimating || _scaleController.isAnimating || _snapController.isAnimating;
+
+  /// True while the pinch scale snap-back is animating. The host checks this so a residual
+  /// single-finger gesture left over from a two-finger pinch release isn't mistaken for a pan (and
+  /// doesn't cancel the snap).
+  bool get isSnapping => _snapController.isAnimating;
 
   /// Stop all active animations without saving state
   void stopAllAnimations() {

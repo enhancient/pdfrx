@@ -49,6 +49,15 @@ class _PdfViewerScrollThumbState extends State<PdfViewerScrollThumb> {
     return widget.isVertical ? _buildVertical(context) : _buildHorizontal(context);
   }
 
+  /// Label for the default thumb: the current page, or a page range like "2–3" when a facing/spread
+  /// layout groups pages. A custom [PdfViewerScrollThumb.thumbBuilder] still receives the single
+  /// `pageNumber` (unchanged) and can call `controller.currentPageRange` itself if it wants a range.
+  String _defaultLabel() {
+    final range = widget.controller.currentPageRange;
+    if (range == null) return '';
+    return range.from == range.to ? '${range.from}' : '${range.from}–${range.to}';
+  }
+
   Widget _buildVertical(BuildContext context) {
     final thumbSize = widget.thumbSize ?? const Size(25, 40);
     final view = widget.controller.visibleRect;
@@ -89,7 +98,7 @@ class _PdfViewerScrollThumbState extends State<PdfViewerScrollThumb> {
                   ),
                 ],
               ),
-              child: Center(child: Text(widget.controller.pageNumber?.toString() ?? '')),
+              child: Center(child: Text(_defaultLabel())),
             ),
         onPanStart: (details) {
           _panStartOffset = top - details.localPosition.dy;
@@ -144,7 +153,7 @@ class _PdfViewerScrollThumbState extends State<PdfViewerScrollThumb> {
                   ),
                 ],
               ),
-              child: Center(child: Text(widget.controller.pageNumber?.toString() ?? '')),
+              child: Center(child: Text(_defaultLabel())),
             ),
         onPanStart: (details) {
           _panStartOffset = left - details.localPosition.dx;

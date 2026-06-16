@@ -48,6 +48,16 @@ class PdfSpreadLayout extends PdfPageLayout {
     throw RangeError.index(spreadIndex, spreadBounds, 'spreadIndex');
   }
 
+  /// The 1-based page numbers that make up the spread at [spreadIndex], in document order (e.g.
+  /// `[2, 3]` for a facing pair, `[1]` for a lone cover).
+  List<int> pagesOfSpread(int spreadIndex) {
+    final pages = <int>[];
+    for (var i = 0; i < pageToSpread.length; i++) {
+      if (pageToSpread[i] == spreadIndex) pages.add(i + 1);
+    }
+    return pages;
+  }
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||

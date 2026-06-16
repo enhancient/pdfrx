@@ -480,7 +480,7 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver, Single
                         ),
                         // #547: At least, on Flutter Web on Windows, the default scroll physics
                         // seems to have some issues with zooming and we don't use it here.
-                        //scrollPhysics: PdfViewerParams.getScrollPhysics(context),
+                        scrollPhysics: PdfViewerParams.getScrollPhysics(context),
                         customizeContextMenuItems: (params, items) {
                           // Example: add custom menu item to search selected text on web
                           items.add(
@@ -532,7 +532,12 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver, Single
                               child: isHorizontalLayout
                                   ? null
                                   : Center(
-                                      child: Text(pageNumber.toString(), style: const TextStyle(color: Colors.white)),
+                                      // Show the range of pages currently on screen (e.g. "3–5"),
+                                      // not just a single page.
+                                      child: Text(
+                                        _pageRangeLabel(controller),
+                                        style: const TextStyle(color: Colors.white),
+                                      ),
                                     ),
                             ),
                           ),
@@ -546,7 +551,10 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver, Single
                               child: !isHorizontalLayout
                                   ? null
                                   : Center(
-                                      child: Text(pageNumber.toString(), style: const TextStyle(color: Colors.white)),
+                                      child: Text(
+                                        _pageRangeLabel(controller),
+                                        style: const TextStyle(color: Colors.white),
+                                      ),
                                     ),
                             ),
                           ),
@@ -830,5 +838,13 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver, Single
     if (path == null) return null;
     final parts = path.split(RegExp(r'[\\/]'));
     return parts.isEmpty ? path : parts.last;
+  }
+
+  /// Label for the range of pages currently visible in the viewport: "5" for a single page, "3–5"
+  /// when several are on screen.
+  static String _pageRangeLabel(PdfViewerController controller) {
+    final range = controller.currentPageRange;
+    if (range == null) return '';
+    return range.from == range.to ? '${range.from}' : '${range.from}–${range.to}';
   }
 }

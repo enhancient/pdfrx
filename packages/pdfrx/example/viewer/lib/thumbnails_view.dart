@@ -1,6 +1,10 @@
 //
 // Super simple thumbnails view
 //
+// Groups pages into spreads using [PdfViewerController.pageRangeOf], so a facing/spread layout
+// shows one thumbnail per spread with a page range (e.g. "2–3"). For single-page layouts every
+// range collapses to a single page, so it behaves exactly like a per-page thumbnail list.
+//
 import 'package:flutter/material.dart';
 import 'package:pdfrx/pdfrx.dart';
 
@@ -10,6 +14,20 @@ class ThumbnailsView extends StatelessWidget {
   final PdfDocumentRef? documentRef;
   final PdfViewerController? controller;
 
+  /// Groups consecutive pages into spread ranges using the controller. Falls back to one page per
+  /// range when the controller is unavailable or the layout doesn't group pages.
+  List<({int from, int to})> _ranges(int pageCount) {
+    final ranges = <({int from, int to})>[];
+    var page = 1;
+    while (page <= pageCount) {
+      final r = controller?.pageRangeOf(page) ?? (from: page, to: page);
+      final to = r.to >= page ? r.to : page;
+      ranges.add((from: page, to: to));
+      page = to + 1;
+    }
+    return ranges;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -18,29 +36,65 @@ class ThumbnailsView extends StatelessWidget {
           ? null
           : PdfDocumentViewBuilder(
               documentRef: documentRef!,
-              builder: (context, document) => ListView.builder(
-                itemCount: document?.pages.length ?? 0,
-                itemBuilder: (context, index) {
-                  return Container(
-                    margin: const EdgeInsets.all(8),
-                    height: 240,
-                    child: Column(
-                      children: [
-                        SizedBox(
-                          key: ValueKey('thumb_${document!.hashCode}_$index'),
-                          height: 220,
-                          child: InkWell(
-                            onTap: () => controller!.goToPage(pageNumber: index + 1, anchor: PdfPageAnchor.top),
-                            onDoubleTap: () => onDoubleTap(document, index + 1),
-                            child: PdfPageView(document: document, pageNumber: index + 1, alignment: Alignment.center),
+              builder: (context, document) {
+                if (document == null) return const SizedBox();
+                // Rebuild as the viewer's layout resolves (single-page → spreads) so the ranges and
+                // the current-range highlight stay in sync.
+                final listenable = controller ?? ValueNotifier(0);
+                return ListenableBuilder(
+                  listenable: listenable,
+                  builder: (context, _) {
+                    final ranges = _ranges(document.pages.length);
+                    final current = controller?.currentPageRange;
+                    return ListView.builder(
+                      itemCount: ranges.length,
+                      itemBuilder: (context, index) {
+                        final range = ranges[index];
+                        // Highlight every spread/page that overlaps the range currently visible in
+                        // the viewport (current can span several spreads when more than one is on
+                        // screen).
+                        final isCurrent = current != null && range.from <= current.to && range.to >= current.from;
+                        final label = range.from == range.to ? '${range.from}' : '${range.from}–${range.to}';
+                        return Container(
+                          margin: const EdgeInsets.all(8),
+                          height: 240,
+                          child: Column(
+                            children: [
+                              SizedBox(
+                                key: ValueKey('thumb_${document.hashCode}_${range.from}_${range.to}'),
+                                height: 220,
+                                child: InkWell(
+                                  onTap: () => controller?.goToPage(pageNumber: range.from, anchor: PdfPageAnchor.top),
+                                  onDoubleTap: () => onDoubleTap(document, range.from),
+                                  child: DecoratedBox(
+                                    decoration: BoxDecoration(
+                                      border: Border.all(color: isCurrent ? Colors.blue : Colors.transparent, width: 2),
+                                    ),
+                                    child: Row(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        for (var p = range.from; p <= range.to; p++)
+                                          Expanded(
+                                            child: PdfPageView(
+                                              document: document,
+                                              pageNumber: p,
+                                              alignment: Alignment.center,
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              Text(label),
+                            ],
                           ),
-                        ),
-                        Text('${index + 1}'),
-                      ],
-                    ),
-                  );
-                },
-              ),
+                        );
+                      },
+                    );
+                  },
+                );
+              },
             ),
     );
   }

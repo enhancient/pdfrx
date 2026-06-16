@@ -22,9 +22,10 @@ import 'interactive_viewer.dart' as iv;
 import 'internals/pdf_error_widget.dart';
 import 'internals/pdf_viewer_key_handler.dart';
 import 'internals/widget_size_sniffer.dart';
+import 'layout/pdf_fit_mode.dart';
 import 'layout/pdf_spread_layout.dart';
-import 'pdf_page_transition.dart';
 import 'pdf_page_links_overlay.dart';
+import 'pdf_page_transition.dart';
 import 'pdf_viewer_layout_metrics.dart';
 import 'pdf_viewer_params.dart';
 import 'scroll_interaction/pdf_viewer_scroll_interaction_delegate.dart';
@@ -262,6 +263,11 @@ class _PdfViewerState extends State<PdfViewer>
   Timer? _discreteReflowTimer; // debounces the zoom-driven discrete spacing reflow
   bool _resizingDiscrete = false; // true while a discrete viewport resize is in flight (cull neighbours)
   Timer? _discreteResizeEndTimer; // clears _resizingDiscrete shortly after the resize settles
+  double _discreteWheelAccum = 0; // accumulated transition-axis scroll toward the next page step
+  int _discreteWheelSign = 0; // direction the accumulator is charging (reset on reversal)
+  Timer? _discreteWheelCooldown; // paces mouse-wheel notches (no inertia) between steps
+  Timer? _discreteWheelIdleTimer; // ends a scroll sequence after a quiet gap (resets accum/step latch)
+  bool _discreteWheelStepped = false; // a trackpad sequence already paged: one step per fling
 
   StreamSubscription<PdfDocumentEvent>? _documentSubscription;
   PdfFontManagerAssociation? _fontManagerAssociation;
@@ -503,6 +509,8 @@ class _PdfViewerState extends State<PdfViewer>
     _interactionEndedTimer?.cancel();
     _discreteReflowTimer?.cancel();
     _discreteResizeEndTimer?.cancel();
+    _discreteWheelCooldown?.cancel();
+    _discreteWheelIdleTimer?.cancel();
     _imageCache.cancelAllPendingRenderings();
     _magnifierImageCache.cancelAllPendingRenderings();
     _animController.dispose();
@@ -646,7 +654,7 @@ class _PdfViewerState extends State<PdfViewer>
                                 ? _getDiscreteBoundaryRect
                                 : null,
                             maxScale: _layoutMetrics.maxScale,
-                            minScale: _layoutMetrics.minScale,
+                            minScale: _effectiveMinScale,
                             panAxis: widget.params.panAxis,
                             panEnabled: widget.params.panEnabled,
                             scaleEnabled: widget.params.scaleEnabled,
@@ -654,7 +662,17 @@ class _PdfViewerState extends State<PdfViewer>
                             onInteractionStart: _onInteractionStart,
                             onInteractionUpdate: _onInteractionUpdate,
                             interactionEndFrictionCoefficient: widget.params.interactionEndFrictionCoefficient,
-                            onWheelDelta: widget.params.scrollByMouseWheel != null ? _onWheelDelta : null,
+                            onWheelDelta:
+                                widget.params.scrollByMouseWheel != null ||
+                                    widget.params.pageTransition == PdfPageTransition.discrete
+                                ? _onWheelDelta
+                                : null,
+                            // Discrete mode routes trackpad scroll through onWheelDelta too (it is
+                            // page navigation, not the InteractiveViewer's direct trackpad pan).
+                            routeTrackpadScrollToWheelDelta: widget.params.pageTransition == PdfPageTransition.discrete,
+                            // Desktop: constrain the pinch translation to bounds (single clamp
+                            // authority shared with the snap-back) rather than free pinch-off.
+                            constrainPinch: _constrainPinchToBounds,
                             onPointerScale: _onPointerScale,
                             scrollPhysics: widget.params.effectiveScrollPhysics,
                             scrollPhysicsScale: widget.params.scrollPhysicsScale,
@@ -950,6 +968,37 @@ class _PdfViewerState extends State<PdfViewer>
     }
   }
 
+  /// Desktop/web-desktop platforms (pointer-primary). On web, [defaultTargetPlatform] reflects the
+  /// host OS, so a desktop browser reports macOS/Windows/Linux and a mobile browser reports
+  /// iOS/Android — making this the right "desktop vs touch" test for both native and web.
+  bool get _isDesktopPlatform =>
+      defaultTargetPlatform == TargetPlatform.macOS ||
+      defaultTargetPlatform == TargetPlatform.windows ||
+      defaultTargetPlatform == TargetPlatform.linux;
+
+  /// On desktop, keep the content centered/bounded during a pinch instead of letting it drift to
+  /// the focal point and snap back. Applies whenever scroll physics is in effect — whether the
+  /// caller set [PdfViewerParams.scrollPhysics] explicitly or it was auto-selected (e.g. discrete
+  /// mode). Only the pinch *pan* is clamped; the scale range and normal pan physics are unchanged.
+  /// Mobile keeps the free pinch-off. (When there is no scroll physics the pinch pan is already
+  /// clamped, so the flag is unnecessary there.)
+  bool get _constrainPinchToBounds => _isDesktopPlatform && widget.params.effectiveScrollPhysics != null;
+
+  /// Minimum zoom for the InteractiveViewer. In discrete mode the view shows one unit at a time, so
+  /// zoom-out is floored at the current unit's fit scale — the size delegate may otherwise allow
+  /// zooming out below fit to reveal several pages (a continuous-mode policy that doesn't apply
+  /// here), which would let a pinch shrink the page below fit with nothing to snap back to.
+  double get _effectiveMinScale {
+    if (widget.params.pageTransition != PdfPageTransition.discrete) {
+      return _layoutMetrics.minScale;
+    }
+    final fit = switch (widget.params.fitMode) {
+      PdfFitMode.fill || PdfFitMode.cover => _layoutMetrics.coverScale,
+      PdfFitMode.fit || PdfFitMode.none => _layoutMetrics.alternativeFitScale ?? _layoutMetrics.coverScale,
+    };
+    return max(_layoutMetrics.minScale, fit);
+  }
+
   int _calcInitialPageNumber() {
     int? pageNumber;
     final calculateInitialPageNumber = widget.params.calculateInitialPageNumber;
@@ -1032,7 +1081,14 @@ class _PdfViewerState extends State<PdfViewer>
 
   void _onInteractionEnd(ScaleEndDetails details) {
     widget.params.onInteractionEnd?.call(details);
-    if (widget.params.pageTransition == PdfPageTransition.discrete && !_hadScaleChangeInInteraction) {
+    // A pinch releases its two fingers sequentially: the second, lone finger starts a fresh gesture
+    // that looks like a pan (no scale change), which would otherwise trigger a page transition and
+    // cancel the scale snap-back that the pinch just started. While that snap-back is animating,
+    // don't treat the gesture as a discrete transition.
+    final isSnappingBack = _interactiveViewerState?.isSnapping ?? false;
+    if (widget.params.pageTransition == PdfPageTransition.discrete &&
+        !_hadScaleChangeInInteraction &&
+        !isSnappingBack) {
       // Decide and commit (or snap back) before clearing the gesture flag, so the boundary
       // provider hands off to the target spread instead of yanking back. (async, fire-and-forget)
       _handleDiscretePageTransition(details);
@@ -1067,12 +1123,12 @@ class _PdfViewerState extends State<PdfViewer>
     widget.params.onInteractionUpdate?.call(details);
   }
 
-  /// Culls neighbours only while a **zoom** would otherwise reveal them — an active pinch, a resize,
-  /// or the brief window where the live zoom has out-run the slot gaps (before the reflow widens
-  /// them), so the next/previous unit would enter the viewport. It is **not** triggered by a pan:
-  /// at rest the boundary keeps the view short of the neighbour (and its shadow), and a pan/snap-back
-  /// leaves the neighbour painted so it slides in/out smoothly. The transition slide also leaves it
-  /// painted (zoom unchanged ⇒ visible extent == slot). Ported in spirit from #589's discrete skip.
+  /// Culls neighbours only while a **zoom** would otherwise reveal them — an active pinch, the scale
+  /// snap-back that settles it, a resize, or the brief window where the live zoom has out-run the
+  /// slot gaps (before the reflow widens them), so the next/previous unit would enter the viewport.
+  /// It is **not** triggered by a pan: at rest the boundary keeps the view short of the neighbour
+  /// (and its shadow), and a pan/page-transition slide leaves the neighbour painted so it slides
+  /// in/out smoothly (zoom unchanged ⇒ visible extent == slot). Ported in spirit from #589's skip.
   bool get _discreteCullsNeighbours {
     if (widget.params.pageTransition != PdfPageTransition.discrete ||
         _pageNumber == null ||
@@ -1080,7 +1136,10 @@ class _PdfViewerState extends State<PdfViewer>
         _viewSize == null) {
       return false;
     }
-    if (_isActivelyZooming || _resizingDiscrete) return true;
+    // _isActivelyZooming is cleared the moment the pinch ends, but the scale snap-back keeps
+    // animating the zoom afterwards — cull through it too so a transient scale can't flash the
+    // neighbours (the snap is scale-only; a pan fling is intentionally not culled).
+    if (_isActivelyZooming || _resizingDiscrete || (_interactiveViewerState?.isSnapping ?? false)) return true;
     final vertical = _discreteIsVertical(_layout!);
     final unit = _discreteUnitBounds(_pageNumber!, _layout!);
     final unitPrimary = vertical ? unit.height : unit.width;
@@ -1319,19 +1378,22 @@ class _PdfViewerState extends State<PdfViewer>
 
     var bounds = _discreteEffectiveBounds(pageNumber, layout);
 
-    // During an active pan (not a pinch), extend the boundary halfway into each existing
-    // neighbour along the transition axis, so the drag can move toward it freely; on release
-    // _handleDiscretePageTransition decides whether to commit or snap back.
-    if (_isActiveGesture && !_hadScaleChangeInInteraction && _viewSize != null) {
+    // During an active pan (not a pinch), extend the boundary on the transition axis to reach the
+    // neighbouring units' bounds, so the drag range scales with the slot geometry rather than a
+    // fixed fraction of the viewport (a fixed extension can't carry a unit past the most-visible
+    // threshold when the main axis is very long). On release _handleDiscretePageTransition decides
+    // whether to commit or snap back.
+    if (_isActiveGesture && !_hadScaleChangeInInteraction) {
       final vertical = _discreteIsVertical(layout);
-      final extension = (vertical ? _viewSize!.height : _viewSize!.width) * 0.5;
-      final hasPrev = _adjacentDiscretePage(pageNumber, layout, -1) != null;
-      final hasNext = _adjacentDiscretePage(pageNumber, layout, 1) != null;
+      final prevPage = _adjacentDiscretePage(pageNumber, layout, -1);
+      final nextPage = _adjacentDiscretePage(pageNumber, layout, 1);
+      final prev = prevPage == null ? null : _discreteUnitBounds(prevPage, layout);
+      final next = nextPage == null ? null : _discreteUnitBounds(nextPage, layout);
       bounds = Rect.fromLTRB(
-        vertical ? bounds.left : bounds.left - (hasPrev ? extension : 0),
-        vertical ? bounds.top - (hasPrev ? extension : 0) : bounds.top,
-        vertical ? bounds.right : bounds.right + (hasNext ? extension : 0),
-        vertical ? bounds.bottom + (hasNext ? extension : 0) : bounds.bottom,
+        vertical ? bounds.left : (prev?.left ?? bounds.left),
+        vertical ? (prev?.top ?? bounds.top) : bounds.top,
+        vertical ? bounds.right : (next?.right ?? bounds.right),
+        vertical ? (next?.bottom ?? bounds.bottom) : bounds.bottom,
       );
     }
     return bounds;
@@ -1375,12 +1437,13 @@ class _PdfViewerState extends State<PdfViewer>
     return vertical ? visible.top <= bounds.top + tolerance : visible.left <= bounds.left + tolerance;
   }
 
-  /// Builds the target matrix for a discrete unit at [scale]. The **cross** axis is always
-  /// centred; the **transition** axis is centred when the unit fits it (1% tolerance for the
-  /// fit-scale case) and otherwise enters at the leading edge ([forward]) / trailing edge so a
-  /// zoomed-in/tall unit advances showing its entry edge without re-centring. Computed directly
-  /// (not via [PdfPageAnchor]) because the anchor's `*Center` variants left-align a unit that is
-  /// narrower than the viewport instead of centring it.
+  /// Builds the target matrix for a discrete unit at [scale]. The **cross** axis is centred when
+  /// the unit fits it, but when the unit overflows it (zoomed in) the current cross-axis position
+  /// is retained — so paging while zoomed keeps you in the same column rather than re-centring. The
+  /// **transition** axis is centred when the unit fits it (1% tolerance for the fit-scale case) and
+  /// otherwise enters at the leading edge ([forward]) / trailing edge so a zoomed-in/tall unit
+  /// advances showing its entry edge. Computed directly (not via [PdfPageAnchor]) because the
+  /// anchor's `*Center` variants left-align a unit that is narrower than the viewport.
   Matrix4 _calcMatrixForDiscreteUnit(int pageNumber, {required bool forward, required double scale}) {
     final rect = _discreteEffectiveBounds(pageNumber, _layout!);
     final vp = _viewSize!;
@@ -1390,11 +1453,24 @@ class _PdfViewerState extends State<PdfViewer>
     final primaryViewport = vertical ? vp.height : vp.width;
     final crossViewport = vertical ? vp.width : vp.height;
     final primaryOverflows = primarySize * s > primaryViewport * 1.01;
+    final crossSize = vertical ? rect.width : rect.height;
+    final crossOverflows = crossSize * s > crossViewport * 1.01;
 
     // Find the document point that should land at the viewport's top-left (screen 0,0): with
     // screen = doc*s + T and T = -docTopLeft*s, choosing docTopLeft positions the unit.
-    final crossCenter = vertical ? rect.center.dx : rect.center.dy;
-    final crossDoc0 = crossCenter - (crossViewport / 2) / s; // centre the cross axis
+    final double crossDoc0;
+    if (crossOverflows) {
+      // Zoomed in past the cross axis: retain the current cross position (the column being read)
+      // rather than re-centring, clamped so the viewport stays within the target unit's cross span.
+      final visible = _txController.value.calcVisibleRect(vp);
+      final lo = vertical ? rect.left : rect.top;
+      final hi = (vertical ? rect.right : rect.bottom) - crossViewport / s;
+      final current = vertical ? visible.left : visible.top;
+      crossDoc0 = current.clamp(lo, max(lo, hi));
+    } else {
+      final crossCenter = vertical ? rect.center.dx : rect.center.dy;
+      crossDoc0 = crossCenter - (crossViewport / 2) / s; // centre the cross axis
+    }
 
     final double primaryDoc0;
     if (primaryOverflows) {
@@ -1421,8 +1497,25 @@ class _PdfViewerState extends State<PdfViewer>
     final layout = _layout;
     if (layout == null || _viewSize == null) return;
 
-    // Snapping back to the current unit: let the InteractiveViewer scroll physics settle it.
-    if (targetPage == currentPage) return;
+    // Snap back to the current unit. The gesture left it overscrolled (a page at fit fills the
+    // viewport, so any drag pushes it off-centre); re-centre it ourselves rather than relying on
+    // the InteractiveViewer's ClampingScrollPhysics spring-back. That spring-back is velocity-
+    // driven, and Flutter web reports a ~0 end-velocity for a mouse drag (the pointer is stationary
+    // at release), so on web a slow drag would stay put and a fling that resolved to "stay" would
+    // glide on past with carried momentum. Driving the snap ourselves — like the commit path and
+    // like #589 — makes it deterministic and identical on every platform. An *in-range* pan (e.g.
+    // while zoomed in) needs no correction, so leave it to the InteractiveViewer and keep its fling
+    // momentum there.
+    if (targetPage == currentPage) {
+      _gotoTargetPageNumber = currentPage;
+      final clamped = _makeMatrixInSafeRange(_txController.value, forceClamp: true);
+      final correction = clamped.getTranslation() - _txController.value.getTranslation();
+      if (correction.length > 0.5) {
+        _interactiveViewerState?.suppressNextBallistic();
+        await _goTo(clamped, duration: const Duration(milliseconds: 250), curve: Curves.easeOutCubic);
+      }
+      return;
+    }
 
     // Preserve the current zoom when zoomed in past fit, else use the unit's fit scale.
     final targetScale = max(_discreteFitScale(targetPage), _currentZoom);
@@ -1433,13 +1526,12 @@ class _PdfViewerState extends State<PdfViewer>
     // per-spread minScale does not change mid-flight (which would re-clamp and stutter).
     _gotoTargetPageNumber = targetPage;
 
-    // The InteractiveViewer starts its own ballistic/bounce simulation right after this gesture's
-    // onInteractionEnd returns (it would spring back toward the boundary we overscrolled, opposite
-    // the travel direction, and fight the snap). Cancel it on the next microtask — after it starts
-    // but before its first frame tick — so only our transition animation drives the matrix.
-    Future.microtask(() {
-      if (mounted) _stopInteractiveViewerAnimation();
-    });
+    // The InteractiveViewer would otherwise start its own ballistic/bounce simulation as this
+    // gesture's onInteractionEnd unwinds (springing back toward the boundary we overscrolled, or
+    // — for a fling — overshooting the target unit and revealing the next page before settling).
+    // Suppress it synchronously here, while still inside onInteractionEnd, so only our transition
+    // animation drives the matrix. (A post-hoc stop raced the ballistic's first frame on web.)
+    _interactiveViewerState?.suppressNextBallistic();
 
     await _goTo(
       _calcMatrixForDiscreteUnit(targetPage, forward: targetPage > currentPage, scale: targetScale),
@@ -1466,8 +1558,11 @@ class _PdfViewerState extends State<PdfViewer>
 
     const minFlingVelocity = 50.0;
     final hasFling = scrollVelocity.abs() > minFlingVelocity;
-    // Ignore a gesture dominated by cross-axis motion unless there is a real primary fling.
-    if (!hasFling && crossVelocity.abs() > scrollVelocity.abs() * 3) {
+    // Ignore a gesture dominated by a *real* cross-axis fling. The velocity ratio alone is noise
+    // for a slow drag-release (near-zero velocities on web, where a mouse stops before the button
+    // is released); only bail when the cross motion is itself a fling, otherwise fall through to
+    // the most-visible decision so a deliberate drag still commits.
+    if (!hasFling && crossVelocity.abs() > minFlingVelocity && crossVelocity.abs() > scrollVelocity.abs() * 3) {
       _isActiveGesture = false;
       return;
     }
@@ -1493,6 +1588,117 @@ class _PdfViewerState extends State<PdfViewer>
     _isActiveGesture = false; // boundary provider now returns tight bounds for the target unit
     await _snapToDiscretePage(targetPage, startPage);
     _interactionStartPage = null;
+  }
+
+  /// Distance a trackpad swipe must accumulate (in viewport logical px) before it steps a page.
+  static const double _kDiscreteTrackpadStepPx = 25.0;
+
+  /// Minimum per-event trackpad delta that counts as real input. Below this is treated as a spent
+  /// inertia tail / noise: it neither accumulates toward a step (so a fling rests at a zoomed page
+  /// edge) nor holds the one-step latch (so a fresh swipe pages again as soon as the prior fling
+  /// has died down, rather than waiting out the full idle gap).
+  static const double _kDiscreteEdgeMinDeltaPx = 4.0;
+
+  /// Discrete-mode handling of mouse-wheel / trackpad scroll. Translates scroll *intent* into page
+  /// navigation, Preview-style: when the unit fits the viewport a notch/swipe steps a page; when
+  /// zoomed in it pans within the page and steps only once the view is pinned to the page edge in
+  /// the scroll direction. Device-kind aware — a mouse notch pages immediately (rate-limited by a
+  /// short cooldown), a trackpad swipe accumulates to a threshold then a longer cooldown swallows
+  /// the browser's inertia tail so one swipe == one page. This is the wheel/trackpad counterpart to
+  /// the gesture-path snap; the #582 scroll interaction delegate remains the authority for
+  /// continuous mode and for intra-page panning here.
+  void _handleDiscreteWheel(PointerScrollEvent event) {
+    final layout = _layout;
+    final current = _gotoTargetPageNumber ?? _pageNumber;
+    if (layout == null || current == null || _viewSize == null) return;
+
+    final vertical = _discreteIsVertical(layout);
+    // Navigation scroll = the transition-axis component, falling back to the other axis so a
+    // vertical-only mouse wheel still pages a horizontally-laid-out document.
+    final raw = vertical
+        ? (event.scrollDelta.dy != 0 ? event.scrollDelta.dy : event.scrollDelta.dx)
+        : (event.scrollDelta.dx != 0 ? event.scrollDelta.dx : event.scrollDelta.dy);
+    if (raw == 0) return;
+    final direction = raw > 0 ? 1 : -1; // scroll down/right ⇒ advance to the next unit
+    final isMouse = event.kind == PointerDeviceKind.mouse;
+    final m = widget.params.scrollByMouseWheel ?? 1.0;
+    // A quiet gap (no events) ends the sequence: a scroll burst plus its trailing inertia is one
+    // sequence, so the idle timer only fires once the inertia has actually stopped. Resets the step
+    // accumulator/direction and the one-step-per-sequence latch.
+    _discreteWheelIdleTimer?.cancel();
+    _discreteWheelIdleTimer = Timer(const Duration(milliseconds: 160), () {
+      _discreteWheelAccum = 0;
+      _discreteWheelSign = 0;
+      _discreteWheelStepped = false;
+    });
+
+    // Trackpad: one page per fling. Once a sequence has stepped, swallow the rest of it (the inertia
+    // tail, however long) so a strong fling can't chain a second step or scroll the page we landed
+    // on. The latch releases the moment the tail decays below the real-input floor — so a fresh
+    // swipe in quick succession pages again without waiting out the whole idle gap. Mouse: pace
+    // notches by a short cooldown instead (no inertia to outrun).
+    if (_discreteWheelStepped) {
+      if (!isMouse && raw.abs() < _kDiscreteEdgeMinDeltaPx) _discreteWheelStepped = false;
+      _discreteWheelAccum = 0;
+      return;
+    }
+    if (_discreteWheelCooldown?.isActive ?? false) {
+      _discreteWheelAccum = 0;
+      return;
+    }
+
+    final unit = _discreteEffectiveBounds(current, layout);
+    final primaryDoc = vertical ? unit.height : unit.width;
+    final primaryVp = vertical ? _viewSize!.height : _viewSize!.width;
+    final overflows = primaryDoc * _currentZoom > primaryVp + 1.0;
+    final atEdge = overflows && _atDiscreteBoundary(current, layout, vertical, direction);
+
+    if (overflows && !atEdge) {
+      // Pan within the zoomed page (confined to the unit by the boundaryProvider).
+      _discreteWheelAccum = 0;
+      _interactionDelegate?.pan(Offset(-event.scrollDelta.dx * m, -event.scrollDelta.dy * m), _layoutMetrics);
+      return;
+    }
+
+    // Page command: at fit, or pushing against the page edge while zoomed in.
+    if (direction != _discreteWheelSign) {
+      _discreteWheelAccum = 0;
+      _discreteWheelSign = direction;
+    }
+    // Ignore the small decaying events of a trackpad inertia tail so they don't slowly accumulate
+    // into a step (a spent fling rests at the boundary / doesn't over-page at fit); a sustained
+    // deliberate scroll has larger per-event deltas and still pages. Mouse notches always count.
+    if (!isMouse && raw.abs() < _kDiscreteEdgeMinDeltaPx) return;
+    _discreteWheelAccum += raw.abs();
+    if (_discreteWheelAccum < (isMouse ? 1.0 : _kDiscreteTrackpadStepPx)) return;
+    _discreteWheelAccum = 0;
+    if (isMouse) {
+      _discreteWheelCooldown?.cancel();
+      _discreteWheelCooldown = Timer(const Duration(milliseconds: 220), () {});
+    } else {
+      _discreteWheelStepped = true; // latch released by the idle timer when the fling stops
+    }
+    _stepDiscretePage(direction);
+  }
+
+  /// Animates one discrete unit in [direction] (+1 next / -1 previous), preserving zoom-in. The
+  /// wheel/trackpad counterpart to [_snapToDiscretePage]; does not touch the gesture-only ballistic
+  /// suppression (there is no InteractiveViewer fling to cancel on the wheel path).
+  Future<void> _stepDiscretePage(int direction) async {
+    final layout = _layout;
+    final current = _gotoTargetPageNumber ?? _pageNumber;
+    if (layout == null || current == null || _viewSize == null) return;
+    final target = _adjacentDiscretePage(current, layout, direction);
+    if (target == null) return; // already at the first/last unit
+    final targetScale = max(_discreteFitScale(target), _currentZoom);
+    _gotoTargetPageNumber = target;
+    _interactionDelegate?.stop(); // cancel any in-flight intra-page physics
+    await _goTo(
+      _calcMatrixForDiscreteUnit(target, forward: direction > 0, scale: targetScale),
+      duration: const Duration(milliseconds: 250),
+      curve: Curves.easeInOutCubic,
+    );
+    _setCurrentPageNumber(target, doSetState: true);
   }
 
   /// Last page number that is explicitly requested to go to.
@@ -1596,12 +1802,44 @@ class _PdfViewerState extends State<PdfViewer>
     }
   }
 
+  /// First and last page numbers whose layout currently intersects the viewport, i.e. the range of
+  /// pages on screen — `(3, 5)` when pages 3–5 are visible, `(2, 2)` for a single page filling the
+  /// view. Works for any layout (sequential, facing/spread). Null when nothing is laid out yet.
+  ({int from, int to})? _visiblePageRange() {
+    final layout = _layout;
+    if (layout == null || _viewSize == null) return null;
+    final visibleRect = _visibleRect;
+    final isHorizontal = layout.documentSize.width > layout.documentSize.height;
+    int? from, to;
+    for (var i = 0; i < layout.pageLayouts.length; i++) {
+      if (_calcPrimaryAxisVisibility(layout.pageLayouts[i], visibleRect, isHorizontal) > 0) {
+        from ??= i + 1;
+        to = i + 1;
+      }
+    }
+    if (from == null || to == null) return null;
+    return (from: from, to: to);
+  }
+
   int? _guessCurrentPageNumber() {
     if (_layout == null || _viewSize == null) return null;
     if (widget.params.calculateCurrentPageNumber != null) {
       return widget.params.calculateCurrentPageNumber!(_visibleRect, _layout!.pageLayouts, _controller!);
     }
 
+    final raw = _guessRawCurrentPageNumber();
+    // Spread-aware page numbering: collapse the guessed page to its spread's anchor (first) page, so
+    // the reported number is stable across a facing pair and onPageChanged fires once per spread
+    // rather than once per half. (Discrete mode already commits the spread's first page.)
+    final spreadLayout = _layout!;
+    if (raw != null && spreadLayout is PdfSpreadLayout && raw >= 1 && raw <= spreadLayout.pageLayouts.length) {
+      return spreadLayout.firstPageOfSpread(spreadLayout.spreadIndexOfPage(raw));
+    }
+    return raw;
+  }
+
+  /// The raw, per-page current-page guess from the visible rect, before spread normalization.
+  int? _guessRawCurrentPageNumber() {
     final visibleRect = _visibleRect;
     final layout = _layout!;
     final isHorizontal = layout.documentSize.width > layout.documentSize.height;
@@ -2417,6 +2655,13 @@ class _PdfViewerState extends State<PdfViewer>
 
         // NOTE: _onWheelDelta may be called from other widget's context and localPosition may be incorrect.
         _interactionDelegate?.zoom(scaleFactor, _controller!.globalToLocal(event.position)!, _layoutMetrics);
+        return;
+      }
+
+      // Discrete mode: wheel/trackpad scroll is page navigation, not free panning (see
+      // _handleDiscreteWheel). The scroll interaction delegate keeps owning continuous mode below.
+      if (widget.params.pageTransition == PdfPageTransition.discrete) {
+        _handleDiscreteWheel(event);
         return;
       }
 
@@ -4650,7 +4895,41 @@ class PdfViewerController extends ValueListenable<Matrix4> {
   int get pageCount => _state._document!.pages.length;
 
   /// The current page number if available.
+  ///
+  /// In a facing/spread layout this is the spread's **first** page (its anchor); use
+  /// [currentPageRange] to get the full "2–3" range. Behaviour for single-page layouts is unchanged.
   int? get pageNumber => _state._pageNumber;
+
+  /// The first and last page numbers currently shown — `(3, 5)` when pages 3–5 are on screen,
+  /// `(2, 2)` for a single page filling the view.
+  ///
+  /// In **continuous** layouts this is the live viewport range (a facing/spread layout yields both
+  /// pages of a visible spread, and spans several spreads when more than one is on screen; a
+  /// sequential layout yields the visible page run). In **discrete** (page-at-a-time) mode it is the
+  /// *settled* unit's range — it updates only when a transition commits, not during the slide, so it
+  /// doesn't transiently span the outgoing and incoming units. Returns null when nothing is laid out.
+  ///
+  /// Additive and backwards compatible: [pageNumber] and [onPageChanged] are unchanged; callers
+  /// that don't need ranges can ignore this. Use [pageRangeOf] for the spread range of one page.
+  ({int from, int to})? get currentPageRange {
+    if (_state.widget.params.pageTransition == PdfPageTransition.discrete) {
+      return pageRangeOf(_state._pageNumber);
+    }
+    return _state._visiblePageRange();
+  }
+
+  /// The first and last page numbers of the spread containing [pageNumber] (see [currentPageRange]).
+  /// Returns null if [pageNumber] is null, and `(from: pageNumber, to: pageNumber)` when the active
+  /// layout does not group pages into spreads.
+  ({int from, int to})? pageRangeOf(int? pageNumber) {
+    if (pageNumber == null) return null;
+    final layout = _state._layout;
+    if (layout is PdfSpreadLayout && pageNumber >= 1 && pageNumber <= layout.pageLayouts.length) {
+      final pages = layout.pagesOfSpread(layout.spreadIndexOfPage(pageNumber));
+      if (pages.isNotEmpty) return (from: pages.first, to: pages.last);
+    }
+    return (from: pageNumber, to: pageNumber);
+  }
 
   /// The document reference associated to the [PdfViewer].
   PdfDocumentRef get documentRef => _state.widget.documentRef;

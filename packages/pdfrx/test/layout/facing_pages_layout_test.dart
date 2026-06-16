@@ -99,6 +99,16 @@ void main() {
       expect(r.spreadBoundsOfPage(2), const Rect.fromLTWH(8, 848, 416, 408));
     });
 
+    test('pagesOfSpread groups pages per spread (drives the page-range API)', () {
+      final r = _resolve(const FacingPagesLayout(firstPageIsCoverPage: true), portraits(3));
+      expect(r.pagesOfSpread(0), [1]); // lone cover
+      expect(r.pagesOfSpread(1), [2, 3]); // facing pair → range "2–3"
+      // simple two-up: each consecutive pair is a spread.
+      final r2 = _resolve(const FacingPagesLayout(), portraits(4));
+      expect(r2.pagesOfSpread(0), [1, 2]);
+      expect(r2.pagesOfSpread(1), [3, 4]);
+    });
+
     test('one spread per pair for a simple two-page document', () {
       final r = _resolve(const FacingPagesLayout(), portraits(2));
       expect(r.spreadCount, 1);
