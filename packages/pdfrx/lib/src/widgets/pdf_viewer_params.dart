@@ -8,8 +8,9 @@ import 'package:pdfrx_engine/pdfrx_engine.dart';
 import '../pdf_document_ref.dart';
 import '../utils/fixed_overscroll_physics.dart';
 import '../utils/platform.dart';
-import 'layout/fit_mode.dart';
+import 'layout/pdf_fit_mode.dart';
 import 'layout/pdf_layout.dart';
+import 'pdf_page_transition.dart';
 import 'pdf_viewer.dart';
 import 'pdf_viewer_scroll_thumb.dart';
 import 'scroll_interaction/pdf_viewer_scroll_interaction_delegate.dart';
@@ -31,6 +32,7 @@ class PdfViewerParams {
     this.backgroundColor = Colors.grey,
     this.layout,
     this.fitMode = PdfFitMode.none,
+    this.pageTransition = PdfPageTransition.continuous,
     this.layoutPages,
     this.normalizeMatrix,
     @Deprecated('Use sizeDelegateProvider: PdfViewerSizeDelegateProviderLegacy(maxScale: ...) instead') this.maxScale,
@@ -143,6 +145,10 @@ class PdfViewerParams {
   /// Has no effect on the built-in default layout or a [layoutPages] closure, which do
   /// not consult it. Defaults to [PdfFitMode.none].
   final PdfFitMode fitMode;
+
+  /// How the viewer moves between pages/spreads: free [PdfPageTransition.continuous]
+  /// scrolling (default) or [PdfPageTransition.discrete] page-at-a-time snapping.
+  final PdfPageTransition pageTransition;
 
   /// Function to customize the layout of the pages.
   ///
@@ -683,6 +689,17 @@ class PdfViewerParams {
   /// beyond the boundaries regardless of which [ScrollPhysics] is used.
   final ScrollPhysics? scrollPhysics;
 
+  /// The scroll physics the viewer actually uses.
+  ///
+  /// Equal to [scrollPhysics], except that when [pageTransition] is [PdfPageTransition.discrete]
+  /// and no [scrollPhysics] was supplied, it falls back to a non-null default
+  /// ([ClampingScrollPhysics]). Page-at-a-time confinement runs through the InteractiveViewer
+  /// scroll-physics clamp, which is inert with null physics, so discrete mode needs *some*
+  /// physics to function. Derived (not a field), so it does not affect equality — two discrete
+  /// configs that both leave [scrollPhysics] null remain equal.
+  ScrollPhysics? get effectiveScrollPhysics =>
+      scrollPhysics ?? (pageTransition == PdfPageTransition.discrete ? const ClampingScrollPhysics() : null);
+
   /// Scroll physics for scaling within the viewer. If null, it uses the same value as [scrollPhysics].
   final ScrollPhysics? scrollPhysicsScale;
 
@@ -749,6 +766,7 @@ class PdfViewerParams {
         other.backgroundColor != backgroundColor ||
         other.layout != layout ||
         other.fitMode != fitMode ||
+        other.pageTransition != pageTransition ||
         // ignore: deprecated_member_use_from_same_package
         other.maxScale != maxScale ||
         // ignore: deprecated_member_use_from_same_package
@@ -795,6 +813,7 @@ class PdfViewerParams {
         other.backgroundColor == backgroundColor &&
         other.layout == layout &&
         other.fitMode == fitMode &&
+        other.pageTransition == pageTransition &&
         // ignore: deprecated_member_use_from_same_package
         other.maxScale == maxScale &&
         // ignore: deprecated_member_use_from_same_package
@@ -868,6 +887,7 @@ class PdfViewerParams {
         backgroundColor.hashCode ^
         layout.hashCode ^
         fitMode.hashCode ^
+        pageTransition.hashCode ^
         // ignore: deprecated_member_use_from_same_package
         maxScale.hashCode ^
         // ignore: deprecated_member_use_from_same_package

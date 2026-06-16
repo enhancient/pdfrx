@@ -22,6 +22,8 @@ import 'interactive_viewer.dart' as iv;
 import 'internals/pdf_error_widget.dart';
 import 'internals/pdf_viewer_key_handler.dart';
 import 'internals/widget_size_sniffer.dart';
+import 'layout/pdf_spread_layout.dart';
+import 'pdf_page_transition.dart';
 import 'pdf_page_links_overlay.dart';
 import 'pdf_viewer_layout_metrics.dart';
 import 'pdf_viewer_params.dart';
@@ -249,6 +251,17 @@ class _PdfViewerState extends State<PdfViewer>
   int? _pageNumber;
   bool _initialized = false;
   bool _usingScrollPercentageMode = false;
+
+  // Discrete (page-at-a-time) transition state. Only read/written when
+  // params.pageTransition == PdfPageTransition.discrete; otherwise inert.
+  int? _interactionStartPage; // page/spread the drag began on
+  bool _hadScaleChangeInInteraction = false; // true once a pinch is detected in this gesture
+  bool _isActiveGesture = false; // true between interaction start and end
+  bool _isActivelyZooming = false; // true during an active pinch-zoom (cull neighbours)
+  double _discreteSpacingZoom = 1.0; // zoom the discrete slot spacing is currently laid out for
+  Timer? _discreteReflowTimer; // debounces the zoom-driven discrete spacing reflow
+  bool _resizingDiscrete = false; // true while a discrete viewport resize is in flight (cull neighbours)
+  Timer? _discreteResizeEndTimer; // clears _resizingDiscrete shortly after the resize settles
 
   StreamSubscription<PdfDocumentEvent>? _documentSubscription;
   PdfFontManagerAssociation? _fontManagerAssociation;
@@ -488,6 +501,8 @@ class _PdfViewerState extends State<PdfViewer>
     _clearFontManagerAssociation();
     _textSelectionChangedDebounceTimer?.cancel();
     _interactionEndedTimer?.cancel();
+    _discreteReflowTimer?.cancel();
+    _discreteResizeEndTimer?.cancel();
     _imageCache.cancelAllPendingRenderings();
     _magnifierImageCache.cancelAllPendingRenderings();
     _animController.dispose();
@@ -621,9 +636,15 @@ class _PdfViewerState extends State<PdfViewer>
                             key: _interactiveViewerKey,
                             transformationController: _txController,
                             constrained: false,
-                            boundaryMargin: widget.params.scrollPhysics == null
+                            boundaryMargin: widget.params.pageTransition == PdfPageTransition.discrete
+                                ? EdgeInsets
+                                      .zero // discrete mode confines via boundaryProvider
+                                : widget.params.scrollPhysics == null
                                 ? const EdgeInsets.all(double.infinity) // NOTE: boundaryMargin is handled manually
                                 : _adjustedBoundaryMargins,
+                            boundaryProvider: widget.params.pageTransition == PdfPageTransition.discrete
+                                ? _getDiscreteBoundaryRect
+                                : null,
                             maxScale: _layoutMetrics.maxScale,
                             minScale: _layoutMetrics.minScale,
                             panAxis: widget.params.panAxis,
@@ -631,11 +652,11 @@ class _PdfViewerState extends State<PdfViewer>
                             scaleEnabled: widget.params.scaleEnabled,
                             onInteractionEnd: _onInteractionEnd,
                             onInteractionStart: _onInteractionStart,
-                            onInteractionUpdate: widget.params.onInteractionUpdate,
+                            onInteractionUpdate: _onInteractionUpdate,
                             interactionEndFrictionCoefficient: widget.params.interactionEndFrictionCoefficient,
                             onWheelDelta: widget.params.scrollByMouseWheel != null ? _onWheelDelta : null,
                             onPointerScale: _onPointerScale,
-                            scrollPhysics: widget.params.scrollPhysics,
+                            scrollPhysics: widget.params.effectiveScrollPhysics,
                             scrollPhysicsScale: widget.params.scrollPhysicsScale,
                             scrollPhysicsAutoAdjustBoundaries: false,
                             // PDF pages
@@ -703,22 +724,34 @@ class _PdfViewerState extends State<PdfViewer>
   }
 
   Offset _calcOverscroll(Matrix4 m, {required Size viewSize}) {
-    final boundaryMargin = _adjustedBoundaryMargins;
-    if (boundaryMargin.containsInfinite) {
-      return Offset.zero;
-    }
-
-    final layout = _layout!;
     final visible = m.calcVisibleRect(viewSize);
     var dxDoc = 0.0;
     var dyDoc = 0.0;
 
-    final leftBoundary = -boundaryMargin.left; // negative margin reduces allowed leftward scroll
-    final rightBoundary =
-        layout.documentSize.width + boundaryMargin.right; // negative margin reduces allowed rightward scroll
-    final topBoundary = -boundaryMargin.top; // negative margin reduces allowed upward scroll
-    final bottomBoundary =
-        layout.documentSize.height + boundaryMargin.bottom; // negative margin reduces allowed downward scroll
+    final double leftBoundary, rightBoundary, topBoundary, bottomBoundary;
+    // Discrete mode confines the view to the current unit (its effective bounds), so the existing
+    // clamp centres it when it fits and keeps it in-bounds when it overflows — the same job the
+    // InteractiveViewer's boundaryProvider does during interaction, applied here for goto/resize.
+    final discretePage = widget.params.pageTransition == PdfPageTransition.discrete
+        ? (_gotoTargetPageNumber ?? _pageNumber)
+        : null;
+    if (discretePage != null && _layout != null && discretePage >= 1 && discretePage <= _layout!.pageLayouts.length) {
+      final unit = _discreteEffectiveBounds(discretePage, _layout!);
+      leftBoundary = unit.left;
+      rightBoundary = unit.right;
+      topBoundary = unit.top;
+      bottomBoundary = unit.bottom;
+    } else {
+      final boundaryMargin = _adjustedBoundaryMargins;
+      if (boundaryMargin.containsInfinite) {
+        return Offset.zero;
+      }
+      final layout = _layout!;
+      leftBoundary = -boundaryMargin.left; // negative margin reduces allowed leftward scroll
+      rightBoundary = layout.documentSize.width + boundaryMargin.right;
+      topBoundary = -boundaryMargin.top;
+      bottomBoundary = layout.documentSize.height + boundaryMargin.bottom;
+    }
 
     if (rightBoundary - leftBoundary <= visible.width) {
       dxDoc = (leftBoundary + rightBoundary - visible.left - visible.right) / 2;
@@ -739,7 +772,7 @@ class _PdfViewerState extends State<PdfViewer>
   }
 
   Matrix4 _calcMatrixForClampedToNearestBoundary(Matrix4 candidate, {required Size viewSize, PdfPageAnchor? anchor}) {
-    if (widget.params.scrollPhysics == null) {
+    if (widget.params.effectiveScrollPhysics == null) {
       _adjustBoundaryMargins(_viewSize!, candidate.zoom, anchor: anchor);
     }
     final overScroll = _calcOverscroll(candidate, viewSize: viewSize);
@@ -763,11 +796,41 @@ class _PdfViewerState extends State<PdfViewer>
     final oldSize = _viewSize;
     final isViewSizeChanged = oldSize != viewSize;
     _viewSize = viewSize;
+
+    // Discrete viewport resize is re-anchored synchronously below (via onLayoutUpdate), so lay the
+    // gaps out for the current zoom and drop any pending zoom-reflow first.
+    final discreteResize =
+        _initialized && widget.params.pageTransition == PdfPageTransition.discrete && isViewSizeChanged;
+    if (discreteResize) {
+      _discreteReflowTimer?.cancel();
+      if (_currentZoom > 0) _discreteSpacingZoom = _currentZoom;
+      // Hide neighbours for the duration of the resize (+ a beat after it settles), so any
+      // transient spacing/matrix inconsistency between events can't flash a neighbouring page.
+      _resizingDiscrete = true;
+      _discreteResizeEndTimer?.cancel();
+      _discreteResizeEndTimer = Timer(const Duration(milliseconds: 150), () {
+        _resizingDiscrete = false;
+        _imageCache.releasePartialImages(); // re-render sharp tiles at the final size
+        if (mounted) _invalidate();
+      });
+    }
+
     final isLayoutChanged = _relayoutPages();
 
     _recalculateMetrics();
     _calcZoomStopTable();
     _adjustBoundaryMargins(viewSize, max(_layoutMetrics.minScale, _currentZoom));
+
+    // Discrete mode: when the live zoom drifts from the zoom the slot gaps were laid out for,
+    // (re)arm a debounce. After the zoom stops (pinch, wheel, button — none reflow per-tick) the
+    // gaps reflow once at the settled zoom, re-anchored synchronously (see _reflowDiscreteSpacingForZoom).
+    if (widget.params.pageTransition == PdfPageTransition.discrete &&
+        _viewSize != null &&
+        _currentZoom > 0 &&
+        (_discreteSpacingZoom - _currentZoom).abs() / _currentZoom >= 0.01) {
+      _discreteReflowTimer?.cancel();
+      _discreteReflowTimer = Timer(const Duration(milliseconds: 120), _reflowDiscreteSpacingForZoom);
+    }
 
     final newSnapshot = PdfViewerLayoutSnapshot(
       viewSize: viewSize,
@@ -820,6 +883,29 @@ class _PdfViewerState extends State<PdfViewer>
 
         callOnViewerSizeChanged();
       });
+    } else if (discreteResize) {
+      // Discrete resize, handled **synchronously** (no microtask) so the matrix lands before this
+      // build paints — no one-frame lag → no jitter/flash. We re-space the gaps for the re-fit
+      // zoom, then let the delegate's onLayoutUpdate re-anchor: it preserves the content position
+      // (keeping a zoomed-in view put) and the now unit-aware _calcOverscroll centres the unit
+      // when it fits / keeps it in bounds when it overflows — exactly #589's path.
+      final newMinScale = _layoutMetrics.minScale;
+      final wasAtFit = (_currentZoom - oldSnapshot.minScale).abs() <= oldSnapshot.minScale * 0.01;
+      final zoomTo = (_currentZoom < newMinScale || wasAtFit) ? newMinScale : _currentZoom;
+      if ((_discreteSpacingZoom - zoomTo).abs() / zoomTo >= 0.01) {
+        _discreteSpacingZoom = zoomTo;
+        if (_relayoutPages()) _recalculateMetrics();
+      }
+      _sizeDelegate?.onLayoutUpdate(
+        oldState: oldSnapshot,
+        newState: newSnapshot,
+        currentZoom: _currentZoom,
+        oldVisibleRect: oldVisibleRect,
+        anchorPageNumber: currentPageNumber ?? _gotoTargetPageNumber ?? _pageNumber,
+        isLayoutChanged: isLayoutChanged,
+        isViewSizeChanged: isViewSizeChanged,
+      );
+      callOnViewerSizeChanged();
     } else if (isLayoutChanged || isViewSizeChanged) {
       Future.microtask(() {
         if (!mounted) {
@@ -845,7 +931,12 @@ class _PdfViewerState extends State<PdfViewer>
         }
       });
     } else if (currentPageNumber != null && _pageNumber != currentPageNumber) {
-      _setCurrentPageNumber(currentPageNumber);
+      // In discrete mode the current page only changes via a committed transition (_snapToDiscretePage),
+      // never the visibility guess — otherwise a build could flip _pageNumber to the other page of a
+      // spread and the unit-clamp would confine to the wrong unit. (Matches #589.)
+      if (widget.params.pageTransition != PdfPageTransition.discrete || _pageNumber == null) {
+        _setCurrentPageNumber(currentPageNumber);
+      }
     }
   }
 
@@ -941,6 +1032,15 @@ class _PdfViewerState extends State<PdfViewer>
 
   void _onInteractionEnd(ScaleEndDetails details) {
     widget.params.onInteractionEnd?.call(details);
+    if (widget.params.pageTransition == PdfPageTransition.discrete && !_hadScaleChangeInInteraction) {
+      // Decide and commit (or snap back) before clearing the gesture flag, so the boundary
+      // provider hands off to the target spread instead of yanking back. (async, fire-and-forget)
+      _handleDiscretePageTransition(details);
+    } else {
+      _isActiveGesture = false;
+    }
+    // The pinch is over; any settling bounce keeps neighbours culled via _hasActiveAnimations.
+    _isActivelyZooming = false;
     _stopInteraction();
   }
 
@@ -948,7 +1048,451 @@ class _PdfViewerState extends State<PdfViewer>
     _interactionDelegate?.stop(); // Stop physics when user touches
     _startInteraction();
     _requestFocus();
+    _isActiveGesture = true;
+    if (widget.params.pageTransition == PdfPageTransition.discrete) {
+      _interactionStartPage = _gotoTargetPageNumber ?? _pageNumber;
+      _hadScaleChangeInInteraction = false;
+    }
     widget.params.onInteractionStart?.call(details);
+  }
+
+  void _onInteractionUpdate(ScaleUpdateDetails details) {
+    if (widget.params.pageTransition == PdfPageTransition.discrete) {
+      // ScaleUpdateDetails.scale is cumulative from gesture start (1.0 == no pinch).
+      if ((details.scale - 1.0).abs() > 0.01) {
+        _hadScaleChangeInInteraction = true;
+        _isActivelyZooming = true; // cull neighbours while pinching (zoom-out overshoot)
+      }
+    }
+    widget.params.onInteractionUpdate?.call(details);
+  }
+
+  /// Culls neighbours only while a **zoom** would otherwise reveal them — an active pinch, a resize,
+  /// or the brief window where the live zoom has out-run the slot gaps (before the reflow widens
+  /// them), so the next/previous unit would enter the viewport. It is **not** triggered by a pan:
+  /// at rest the boundary keeps the view short of the neighbour (and its shadow), and a pan/snap-back
+  /// leaves the neighbour painted so it slides in/out smoothly. The transition slide also leaves it
+  /// painted (zoom unchanged ⇒ visible extent == slot). Ported in spirit from #589's discrete skip.
+  bool get _discreteCullsNeighbours {
+    if (widget.params.pageTransition != PdfPageTransition.discrete ||
+        _pageNumber == null ||
+        _layout == null ||
+        _viewSize == null) {
+      return false;
+    }
+    if (_isActivelyZooming || _resizingDiscrete) return true;
+    final vertical = _discreteIsVertical(_layout!);
+    final unit = _discreteUnitBounds(_pageNumber!, _layout!);
+    final unitPrimary = vertical ? unit.height : unit.width;
+    final viewportPrimary = vertical ? _viewSize!.height : _viewSize!.width;
+    final slotZoom = _discreteSpacingZoom <= 0 ? 1.0 : _discreteSpacingZoom;
+    final slot = max(unitPrimary, viewportPrimary / slotZoom);
+    final visiblePrimary = _currentZoom > 0 ? viewportPrimary / _currentZoom : double.infinity;
+    return visiblePrimary > slot * 1.01; // adjacent unit about to enter view ⇒ cull. 1% tolerance.
+  }
+
+  /// True if page [pageIndex] (0-based) belongs to a unit that should still be painted while
+  /// [_discreteCullsNeighbours] — the current unit or, mid-transition, the goto target.
+  bool _discreteShouldPaintPage(int pageIndex) {
+    final layout = _layout;
+    final pageNumber = pageIndex + 1;
+    bool inUnitOf(int? anchor) {
+      if (anchor == null) return false;
+      if (layout is PdfSpreadLayout) return layout.spreadIndexOfPage(pageNumber) == layout.spreadIndexOfPage(anchor);
+      return pageNumber == anchor;
+    }
+
+    return inUnitOf(_pageNumber) || inUnitOf(_gotoTargetPageNumber);
+  }
+
+  // ===========================================================================
+  // Discrete (page-at-a-time) transition machinery.
+  //
+  // Ported from PR #589's discrete mode, adapted to the value-type layout system:
+  //   - spread geometry comes from the committed PdfSpreadLayout (spreadBounds/pageToSpread);
+  //   - the transition axis is derived from the document aspect (taller ⇒ vertical), matching
+  //     #589's PdfPageLayout.primaryAxis;
+  //   - the post-transition fit scale is sourced from the fitMode/spread-aware size delegate
+  //     (the successor to #589's calculateFitScale);
+  //   - the boundary handoff reuses _gotoTargetPageNumber + the InteractiveViewer
+  //     boundaryProvider (see _getDiscreteBoundaryRect).
+  // The snap/anchor logic (_snapToPage/_getSnapAnchor) is preserved deliberately: it is what
+  // lets a zoomed-in/overflowing page advance to the next anchored at the entry edge rather
+  // than re-centering or re-fitting.
+  // ===========================================================================
+
+  /// Whether discrete transitions move along the vertical axis (taller-than-wide document).
+  bool _discreteIsVertical(PdfPageLayout layout) => layout.documentSize.height >= layout.documentSize.width;
+
+  /// Document-space bounds of the discrete unit containing [pageNumber] — the spread for a
+  /// [PdfSpreadLayout], otherwise the single page.
+  Rect _discreteUnitBounds(int pageNumber, PdfPageLayout layout) {
+    if (layout is PdfSpreadLayout) {
+      return layout.spreadBoundsOfPage(pageNumber) ?? layout.pageLayouts[pageNumber - 1];
+    }
+    return layout.pageLayouts[pageNumber - 1];
+  }
+
+  /// First page (1-based) of the discrete unit adjacent to [pageNumber] in [direction]
+  /// (-1 previous, +1 next), or null if there is none.
+  int? _adjacentDiscretePage(int pageNumber, PdfPageLayout layout, int direction) {
+    if (layout is PdfSpreadLayout) {
+      final spread = layout.spreadIndexOfPage(pageNumber) + direction;
+      if (spread < 0 || spread >= layout.spreadCount) return null;
+      return layout.firstPageOfSpread(spread);
+    }
+    final candidate = pageNumber + direction;
+    if (candidate < 1 || candidate > layout.pageLayouts.length) return null;
+    return candidate;
+  }
+
+  /// Effective bounds of the discrete unit for positioning: the unit rect inflated by the page
+  /// margin and (when finite) the user's boundary margin.
+  Rect _discreteEffectiveBounds(int pageNumber, PdfPageLayout layout) {
+    final base = _discreteUnitBounds(pageNumber, layout).inflate(widget.params.margin);
+    final userMargin = widget.params.boundaryMargin ?? EdgeInsets.zero;
+    return userMargin.inflateRectIfFinite(base);
+  }
+
+  /// The mode-aware scale that "fits" the discrete unit containing [pageNumber] to the
+  /// viewport, used as the post-transition zoom. Sourced from the committed fitMode/spread-aware
+  /// size delegate (the successor to #589's `calculateFitScale`).
+  double _discreteFitScale(int pageNumber) {
+    if (_sizeDelegate == null || _viewSize == null || _layout == null) return _currentZoom;
+    final metrics = _sizeDelegate!.calculateMetrics(
+      viewSize: _viewSize!,
+      layout: _layout,
+      pageNumber: pageNumber,
+      pageMargin: widget.params.margin,
+      boundaryMargin: widget.params.boundaryMargin,
+      fitMode: widget.params.fitMode,
+    );
+    return metrics.minScale;
+  }
+
+  /// Re-spaces a resolved layout for discrete mode: each discrete unit (spread, or single page
+  /// for a non-spread layout) is placed in a slot of `max(unitSize, viewport / zoom)` along the
+  /// transition axis and centred both ways. The slot tracks the *effective* viewport (the
+  /// document extent visible at [zoom]), so scaled by the matrix the on-screen slot is always one
+  /// viewport: neighbours sit one viewport off-screen at every zoom — the document gap grows as
+  /// you zoom out and shrinks as you zoom in. Recomputed on a viewport change (via [_relayoutPages])
+  /// and, debounced, on zoom-settle (via [_reflowDiscreteSpacingForZoom], which re-anchors the
+  /// current unit synchronously so there is no geometry/matrix mismatch). Ported from #589's
+  /// `_addDiscreteSpacing`, made effective-viewport aware.
+  PdfPageLayout _applyDiscreteSlotSpacing(PdfPageLayout layout, Size viewport, double zoom) {
+    if (viewport.isEmpty || layout.pageLayouts.isEmpty) return layout;
+
+    final vertical = layout.documentSize.height >= layout.documentSize.width;
+    final slotZoom = zoom <= 0 ? 1.0 : zoom;
+    final viewportPrimary = (vertical ? viewport.height : viewport.width) / slotZoom;
+    final viewportCross = vertical ? viewport.width : viewport.height;
+
+    final spread = layout is PdfSpreadLayout ? layout : null;
+    final unitCount = spread?.spreadCount ?? layout.pageLayouts.length;
+    Rect unitBounds(int u) => spread != null ? spread.spreadBounds[u] : layout.pageLayouts[u];
+
+    // The strategy's own inter-unit gap (e.g. spacing between spreads). The dynamic slot must
+    // never shrink the gap below this — when zoomed in so a unit fills the viewport, neighbours
+    // should still be separated by the original spacing, not jammed against it.
+    var originalGap = 0.0;
+    if (unitCount >= 2) {
+      final b0 = unitBounds(0);
+      final b1 = unitBounds(1);
+      originalGap = max(0.0, vertical ? b1.top - b0.bottom : b1.left - b0.right);
+    }
+    // Keep the gap wide enough that the confinement boundary (the unit inflated by the page margin)
+    // can't reach a neighbour's drop shadow: gap ≥ margin + shadow reach. Then a neighbour — even
+    // its shadow — is never in view at rest, at any zoom, without having to cull it (so a snap-back
+    // slides it out smoothly instead of popping it).
+    final shadow = widget.params.pageDropShadow;
+    final shadowExtent = shadow == null ? 0.0 : shadow.blurRadius + shadow.spreadRadius.abs() + shadow.offset.distance;
+    originalGap = max(originalGap, widget.params.margin + shadowExtent);
+
+    final newPageLayouts = List<Rect>.from(layout.pageLayouts);
+    final newUnitBounds = <Rect>[];
+    var offset = 0.0;
+
+    for (var u = 0; u < unitCount; u++) {
+      final b = unitBounds(u);
+      final primarySize = vertical ? b.height : b.width;
+      final crossSize = vertical ? b.width : b.height;
+      // Slot ≥ one effective viewport (so neighbours are a viewport off-screen), but never tighter
+      // than the unit plus its original gap (so zoomed-in neighbours keep the original spacing).
+      final slot = max(primarySize + originalGap, viewportPrimary);
+      final newPrimaryStart = offset + (slot - primarySize) / 2;
+      final newCrossStart = max(0.0, (viewportCross - crossSize) / 2);
+      final oldPrimaryStart = vertical ? b.top : b.left;
+      final oldCrossStart = vertical ? b.left : b.top;
+      final delta = vertical
+          ? Offset(newCrossStart - oldCrossStart, newPrimaryStart - oldPrimaryStart)
+          : Offset(newPrimaryStart - oldPrimaryStart, newCrossStart - oldCrossStart);
+
+      if (spread != null) {
+        for (var p = 0; p < spread.pageToSpread.length; p++) {
+          if (spread.pageToSpread[p] == u) newPageLayouts[p] = layout.pageLayouts[p].shift(delta);
+        }
+      } else {
+        newPageLayouts[u] = layout.pageLayouts[u].shift(delta);
+      }
+      newUnitBounds.add(b.shift(delta));
+      offset += slot;
+    }
+
+    final crossMax = newPageLayouts.fold<double>(0, (m, r) => max(m, vertical ? r.right : r.bottom));
+    final crossDoc = max(viewportCross, crossMax);
+    final docSize = vertical ? Size(crossDoc, offset) : Size(offset, crossDoc);
+
+    if (spread != null) {
+      return PdfSpreadLayout(
+        pageLayouts: newPageLayouts,
+        documentSize: docSize,
+        spreadBounds: newUnitBounds,
+        pageToSpread: spread.pageToSpread,
+      );
+    }
+    return PdfPageLayout(pageLayouts: newPageLayouts, documentSize: docSize);
+  }
+
+  /// True when no zoom gesture or animation is in flight — safe to reflow the discrete spacing
+  /// and re-anchor without fighting a live interaction.
+  bool get _discreteSettled =>
+      !_isActiveGesture &&
+      !_isActivelyZooming &&
+      !_animController.isAnimating &&
+      !(_interactiveViewerState?.hasActiveAnimations ?? false);
+
+  /// Debounced reflow of the discrete slot gaps for the settled zoom. Recomputes the geometry
+  /// with `slot = viewport / zoom` and **synchronously** translates the matrix so the current
+  /// unit keeps its on-screen position — doing both together (not via a post-frame/microtask)
+  /// is what keeps the page from jumping for a frame (the cause of the earlier zoom artifacts).
+  void _reflowDiscreteSpacingForZoom() {
+    _discreteReflowTimer = null;
+    if (!mounted ||
+        widget.params.pageTransition != PdfPageTransition.discrete ||
+        _layout == null ||
+        _viewSize == null ||
+        !_discreteSettled ||
+        _currentZoom <= 0) {
+      return;
+    }
+    if ((_discreteSpacingZoom - _currentZoom).abs() / _currentZoom < 0.01) return; // already in sync
+
+    final anchorPage = _gotoTargetPageNumber ?? _pageNumber;
+    if (anchorPage == null || anchorPage < 1 || anchorPage > _layout!.pageLayouts.length) return;
+
+    final vertical = _discreteIsVertical(_layout!);
+    final oldBounds = _discreteUnitBounds(anchorPage, _layout!);
+    final oldStart = vertical ? oldBounds.top : oldBounds.left;
+
+    _discreteSpacingZoom = _currentZoom;
+    if (!_relayoutPages()) return; // gaps unchanged ⇒ nothing to anchor
+    _recalculateMetrics();
+
+    final newBounds = _discreteUnitBounds(anchorPage, _layout!);
+    final newStart = vertical ? newBounds.top : newBounds.left;
+    final deltaDoc = newStart - oldStart;
+    if (deltaDoc != 0) {
+      final m = _txController.value.clone();
+      final t = m.getTranslation();
+      // Keep the anchor unit fixed on screen: screen = doc*zoom + T, so T -= deltaDoc*zoom.
+      final delta = vertical ? Offset(0, deltaDoc) : Offset(deltaDoc, 0);
+      m.setTranslation(vec.Vector3(t.x - delta.dx * _currentZoom, t.y - delta.dy * _currentZoom, 0));
+      // Move the current unit's cached high-res tiles with it (same delta), so they stay aligned
+      // with the moved pages + shifted matrix instead of flashing at the old spot or blinking to
+      // low-res. Neighbour tiles shift too but they're off-screen, so it doesn't matter.
+      _imageCache.shiftPartialImages(delta);
+      _txController.value = m;
+    }
+    if (mounted) setState(() {});
+  }
+
+  /// Boundary for discrete mode: confines the view to the current discrete unit, extended
+  /// partway into the neighbouring unit during an active drag so a swipe can carry the view
+  /// toward it (the release handler then commits or snaps back). Read by the InteractiveViewer
+  /// [iv.BoundaryProvider]; returns null to defer to the static margin path.
+  Rect? _getDiscreteBoundaryRect(Rect visibleRect, Size childSize) {
+    final layout = _layout;
+    final pageNumber = _gotoTargetPageNumber ?? _pageNumber;
+    if (layout == null || pageNumber == null || pageNumber < 1 || pageNumber > layout.pageLayouts.length) {
+      return null;
+    }
+
+    var bounds = _discreteEffectiveBounds(pageNumber, layout);
+
+    // During an active pan (not a pinch), extend the boundary halfway into each existing
+    // neighbour along the transition axis, so the drag can move toward it freely; on release
+    // _handleDiscretePageTransition decides whether to commit or snap back.
+    if (_isActiveGesture && !_hadScaleChangeInInteraction && _viewSize != null) {
+      final vertical = _discreteIsVertical(layout);
+      final extension = (vertical ? _viewSize!.height : _viewSize!.width) * 0.5;
+      final hasPrev = _adjacentDiscretePage(pageNumber, layout, -1) != null;
+      final hasNext = _adjacentDiscretePage(pageNumber, layout, 1) != null;
+      bounds = Rect.fromLTRB(
+        vertical ? bounds.left : bounds.left - (hasPrev ? extension : 0),
+        vertical ? bounds.top - (hasPrev ? extension : 0) : bounds.top,
+        vertical ? bounds.right : bounds.right + (hasNext ? extension : 0),
+        vertical ? bounds.bottom + (hasNext ? extension : 0) : bounds.bottom,
+      );
+    }
+    return bounds;
+  }
+
+  /// Primary-axis length of the intersection between [visibleRect] and [unitBounds] — "how
+  /// much of this unit is on screen along the scroll axis".
+  double _discreteVisibleExtent(Rect visibleRect, Rect unitBounds, bool vertical) {
+    final i = visibleRect.intersect(unitBounds);
+    if (i.isEmpty) return 0;
+    return vertical ? i.height : i.width;
+  }
+
+  /// The discrete unit (by first page) showing the most primary-axis area after a drag —
+  /// current, previous, or next. Works at any zoom level. Returns [currentPage] to snap back.
+  int _mostVisibleDiscretePage(int currentPage, PdfPageLayout layout, bool vertical) {
+    final visible = _txController.value.calcVisibleRect(_viewSize!);
+    final cur = _discreteVisibleExtent(visible, _discreteUnitBounds(currentPage, layout), vertical);
+    final prevPage = _adjacentDiscretePage(currentPage, layout, -1);
+    final nextPage = _adjacentDiscretePage(currentPage, layout, 1);
+    final prev = prevPage == null
+        ? 0.0
+        : _discreteVisibleExtent(visible, _discreteUnitBounds(prevPage, layout), vertical);
+    final next = nextPage == null
+        ? 0.0
+        : _discreteVisibleExtent(visible, _discreteUnitBounds(nextPage, layout), vertical);
+    if (prev > cur && prev >= next) return prevPage!;
+    if (next > cur && next > prev) return nextPage!;
+    return currentPage;
+  }
+
+  /// Whether the view is at the [direction] edge (-1 leading / +1 trailing) of the unit
+  /// containing [pageNumber] — used to decide whether a fling should page or scroll within.
+  bool _atDiscreteBoundary(int pageNumber, PdfPageLayout layout, bool vertical, int direction) {
+    final bounds = _discreteUnitBounds(pageNumber, layout);
+    final visible = _txController.value.calcVisibleRect(_viewSize!);
+    final tolerance = 10.0 / _currentZoom; // ~10 screen px
+    if (direction > 0) {
+      return vertical ? visible.bottom >= bounds.bottom - tolerance : visible.right >= bounds.right - tolerance;
+    }
+    return vertical ? visible.top <= bounds.top + tolerance : visible.left <= bounds.left + tolerance;
+  }
+
+  /// Builds the target matrix for a discrete unit at [scale]. The **cross** axis is always
+  /// centred; the **transition** axis is centred when the unit fits it (1% tolerance for the
+  /// fit-scale case) and otherwise enters at the leading edge ([forward]) / trailing edge so a
+  /// zoomed-in/tall unit advances showing its entry edge without re-centring. Computed directly
+  /// (not via [PdfPageAnchor]) because the anchor's `*Center` variants left-align a unit that is
+  /// narrower than the viewport instead of centring it.
+  Matrix4 _calcMatrixForDiscreteUnit(int pageNumber, {required bool forward, required double scale}) {
+    final rect = _discreteEffectiveBounds(pageNumber, _layout!);
+    final vp = _viewSize!;
+    final s = scale;
+    final vertical = _discreteIsVertical(_layout!);
+    final primarySize = vertical ? rect.height : rect.width;
+    final primaryViewport = vertical ? vp.height : vp.width;
+    final crossViewport = vertical ? vp.width : vp.height;
+    final primaryOverflows = primarySize * s > primaryViewport * 1.01;
+
+    // Find the document point that should land at the viewport's top-left (screen 0,0): with
+    // screen = doc*s + T and T = -docTopLeft*s, choosing docTopLeft positions the unit.
+    final crossCenter = vertical ? rect.center.dx : rect.center.dy;
+    final crossDoc0 = crossCenter - (crossViewport / 2) / s; // centre the cross axis
+
+    final double primaryDoc0;
+    if (primaryOverflows) {
+      primaryDoc0 = forward
+          ? (vertical ? rect.top : rect.left) // leading edge to screen start
+          : (vertical ? rect.bottom : rect.right) - primaryViewport / s; // trailing edge to screen end
+    } else {
+      final primaryCenter = vertical ? rect.center.dy : rect.center.dx;
+      primaryDoc0 = primaryCenter - (primaryViewport / 2) / s; // centre the transition axis
+    }
+
+    final docTopLeft = vertical ? Offset(crossDoc0, primaryDoc0) : Offset(primaryDoc0, crossDoc0);
+    return Matrix4.compose(
+      vec.Vector3(-docTopLeft.dx * s, -docTopLeft.dy * s, 0),
+      vec.Quaternion.identity(),
+      vec.Vector3(s, s, s),
+    );
+  }
+
+  /// Animates to the target discrete unit, preserving the user's zoom if they had zoomed in
+  /// past the unit's fit scale (so a zoomed-in page advances without zooming out). Ported from
+  /// #589's `_snapToPage`.
+  Future<void> _snapToDiscretePage(int targetPage, int currentPage) async {
+    final layout = _layout;
+    if (layout == null || _viewSize == null) return;
+
+    // Snapping back to the current unit: let the InteractiveViewer scroll physics settle it.
+    if (targetPage == currentPage) return;
+
+    // Preserve the current zoom when zoomed in past fit, else use the unit's fit scale.
+    final targetScale = max(_discreteFitScale(targetPage), _currentZoom);
+
+    // Hand the boundary off to the target unit *before* animating, so the per-frame clamp
+    // confines to the destination rather than dragging the view back to the origin unit. But
+    // keep _pageNumber on the origin until the animation lands, so the size delegate's
+    // per-spread minScale does not change mid-flight (which would re-clamp and stutter).
+    _gotoTargetPageNumber = targetPage;
+
+    // The InteractiveViewer starts its own ballistic/bounce simulation right after this gesture's
+    // onInteractionEnd returns (it would spring back toward the boundary we overscrolled, opposite
+    // the travel direction, and fight the snap). Cancel it on the next microtask — after it starts
+    // but before its first frame tick — so only our transition animation drives the matrix.
+    Future.microtask(() {
+      if (mounted) _stopInteractiveViewerAnimation();
+    });
+
+    await _goTo(
+      _calcMatrixForDiscreteUnit(targetPage, forward: targetPage > currentPage, scale: targetScale),
+      duration: const Duration(milliseconds: 350),
+      curve: Curves.easeInOutCubic,
+    );
+
+    _setCurrentPageNumber(targetPage, doSetState: true);
+  }
+
+  /// Decides the target unit on gesture end (fling at a boundary, else most-visible-area) and
+  /// commits via [_snapToDiscretePage]. Ported from #589's `_handleDiscretePageTransition`.
+  Future<void> _handleDiscretePageTransition(ScaleEndDetails details) async {
+    final layout = _layout;
+    final startPage = _interactionStartPage;
+    if (layout == null || startPage == null || _viewSize == null) {
+      _isActiveGesture = false;
+      return;
+    }
+
+    final vertical = _discreteIsVertical(layout);
+    final scrollVelocity = vertical ? details.velocity.pixelsPerSecond.dy : details.velocity.pixelsPerSecond.dx;
+    final crossVelocity = vertical ? details.velocity.pixelsPerSecond.dx : details.velocity.pixelsPerSecond.dy;
+
+    const minFlingVelocity = 50.0;
+    final hasFling = scrollVelocity.abs() > minFlingVelocity;
+    // Ignore a gesture dominated by cross-axis motion unless there is a real primary fling.
+    if (!hasFling && crossVelocity.abs() > scrollVelocity.abs() * 3) {
+      _isActiveGesture = false;
+      return;
+    }
+
+    // Cancel any InteractiveViewer fling that would fight the snap.
+    _stopInteractiveViewerAnimation();
+
+    int targetPage;
+    if (hasFling) {
+      // Positive velocity = finger moving down/right ⇒ the viewport moves toward the previous
+      // unit; negative ⇒ next. Only page if the fling starts at that boundary, otherwise fall
+      // back to the most-visible decision so a fling mid-unit still snaps cleanly.
+      final direction = scrollVelocity > 0 ? -1 : 1;
+      if (_atDiscreteBoundary(startPage, layout, vertical, direction)) {
+        targetPage = _adjacentDiscretePage(startPage, layout, direction) ?? startPage;
+      } else {
+        targetPage = _mostVisibleDiscretePage(startPage, layout, vertical);
+      }
+    } else {
+      targetPage = _mostVisibleDiscretePage(startPage, layout, vertical);
+    }
+
+    _isActiveGesture = false; // boundary provider now returns tight bounds for the target unit
+    await _snapToDiscretePage(targetPage, startPage);
+    _interactionStartPage = null;
   }
 
   /// Last page number that is explicitly requested to go to.
@@ -1165,13 +1709,19 @@ class _PdfViewerState extends State<PdfViewer>
     // Dispatch precedence: params.layout (value-type strategy) → params.layoutPages
     // (closure) → built-in default. The viewport is passed to resolve() at call time
     // and never stored on the strategy, so a resize relayouts without equality churn.
-    final newLayout =
+    var newLayout =
         widget.params.layout?.resolve(
           pages: _document!.pages,
           viewport: _viewSize ?? Size.zero,
           params: widget.params,
         ) ??
         (widget.params.layoutPages ?? _layoutPages)(_document!.pages, widget.params);
+    // Discrete mode re-spaces units into slots sized to the effective viewport (viewport /
+    // spacing-zoom). Recomputed on viewport change here, and on zoom-settle via the debounced
+    // _reflowDiscreteSpacingForZoom (which updates _discreteSpacingZoom + re-anchors).
+    if (widget.params.pageTransition == PdfPageTransition.discrete && !(_viewSize?.isEmpty ?? true)) {
+      newLayout = _applyDiscreteSlotSpacing(newLayout, _viewSize!, _discreteSpacingZoom);
+    }
     if (_layout == newLayout) {
       return false;
     }
@@ -1501,10 +2051,13 @@ class _PdfViewerState extends State<PdfViewer>
     final dropShadowPaint = widget.params.pageDropShadow?.toPaint()?..style = PaintingStyle.fill;
     cacheTargetRect ??= targetRect;
 
+    final cullDiscreteNeighbours = _discreteCullsNeighbours;
     for (var i = 0; i < _document!.pages.length; i++) {
       final rect = _layout!.pageLayouts[i];
       final intersection = rect.intersect(cacheTargetRect);
-      if (intersection.isEmpty) {
+      // In discrete mode, while pinch-zooming or animating, paint only the current/target unit
+      // so a zoom-out past the boundary doesn't momentarily reveal neighbouring pages.
+      if (intersection.isEmpty || (cullDiscreteNeighbours && !_discreteShouldPaintPage(i))) {
         final page = _document!.pages[i];
         cache.cancelPendingRenderings(page.pageNumber);
         if (cache.pageImages.containsKey(i + 1)) {
@@ -1569,11 +2122,15 @@ class _PdfViewerState extends State<PdfViewer>
       }
 
       final pageScale = scale * max(rect.width / page.width, rect.height / page.height);
-      if (!enableLowResolutionPagePreview || pageScale > previewScaleLimit) {
+      // While a discrete resize is in flight, don't draw or request high-res tiles: a tile holds
+      // its own document rect, so as the page moves/rescales each event it would draw as a stale
+      // "second image". The full-page preview above follows the live page rect, so it stays smooth;
+      // the tiles are released and re-rendered once the resize settles.
+      if (!_resizingDiscrete && (!enableLowResolutionPagePreview || pageScale > previewScaleLimit)) {
         _requestRealSizePartialImage(cache, page, pageScale, targetRect);
       }
 
-      if ((!enableLowResolutionPagePreview || pageScale > previewScaleLimit) && partial != null) {
+      if (!_resizingDiscrete && (!enableLowResolutionPagePreview || pageScale > previewScaleLimit) && partial != null) {
         partial.draw(canvas, filterQuality);
       }
 
@@ -1912,7 +2469,9 @@ class _PdfViewerState extends State<PdfViewer>
 
   /// Restrict matrix to the safe range.
   Matrix4 _makeMatrixInSafeRange(Matrix4 newValue, {bool forceClamp = false, PdfPageAnchor? anchor}) {
-    if (!forceClamp && (_layout == null || _viewSize == null || widget.params.scrollPhysics != null)) return newValue;
+    if (!forceClamp && (_layout == null || _viewSize == null || widget.params.effectiveScrollPhysics != null)) {
+      return newValue;
+    }
     if (widget.params.normalizeMatrix != null) {
       return widget.params.normalizeMatrix!(newValue, _viewSize!, _layout!, _controller);
     }
@@ -2089,6 +2648,7 @@ class _PdfViewerState extends State<PdfViewer>
     Matrix4? destination, {
     Duration duration = const Duration(milliseconds: 200),
     PdfPageAnchor? anchor,
+    Curve curve = Curves.easeInOut,
   }) async {
     void update() {
       if (_animationResettingGuard != 0) return;
@@ -2108,7 +2668,7 @@ class _PdfViewerState extends State<PdfViewer>
       }
       _animGoTo = Matrix4Tween(begin: _txController.value, end: destinationInSafeRange).animate(_animController);
       _animGoTo!.addListener(update);
-      await _animController.animateTo(1.0, duration: duration, curve: Curves.easeInOut);
+      await _animController.animateTo(1.0, duration: duration, curve: curve);
     } finally {
       _animGoTo?.removeListener(update);
     }
@@ -3643,6 +4203,21 @@ class _PdfPageImageCache {
       image.image.dispose();
     }
     pageImagesPartial.clear();
+  }
+
+  /// Translates cached partial (high-res) tiles by [delta] in document space, reusing their
+  /// images. Used when discrete mode reflows the slot gaps and shifts the matrix to keep the
+  /// current unit fixed: the tiles' stored document rects move with the pages so they stay
+  /// screen-valid, avoiding both a misplaced-tile flash and the re-render blink of releasing them.
+  void shiftPartialImages(Offset delta) {
+    if (delta == Offset.zero || pageImagesPartial.isEmpty) return;
+    final shifted = <int, _PdfImageWithScaleAndRect>{};
+    pageImagesPartial.forEach((page, img) {
+      shifted[page] = _PdfImageWithScaleAndRect(img.image, img.scale, img.rect.shift(delta), img.left, img.top);
+    });
+    pageImagesPartial
+      ..clear()
+      ..addAll(shifted);
   }
 
   void releaseAllImages() {

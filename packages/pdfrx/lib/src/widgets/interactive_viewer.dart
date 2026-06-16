@@ -58,6 +58,12 @@ typedef InteractiveViewerWidgetBuilder = Widget Function(BuildContext context, Q
 ///
 /// ** See code in examples/api/lib/widgets/interactive_viewer/interactive_viewer.0.dart **
 /// {@end-tool}
+
+/// Returns the document-space [Rect] the view should be confined to for the given
+/// `visibleRect` and `childSize` (both in child/scene coordinates), or null to fall back to
+/// [InteractiveViewer.boundaryMargin]. See [InteractiveViewer.boundaryProvider].
+typedef BoundaryProvider = Rect? Function(Rect visibleRect, Size childSize);
+
 @immutable
 class InteractiveViewer extends StatefulWidget {
   /// Create an InteractiveViewer.
@@ -87,6 +93,7 @@ class InteractiveViewer extends StatefulWidget {
     this.scrollPhysics,
     this.scrollPhysicsScale,
     this.scrollPhysicsAutoAdjustBoundaries = true,
+    this.boundaryProvider,
   }) : assert(minScale > 0),
        assert(interactionEndFrictionCoefficient > 0),
        assert(minScale.isFinite),
@@ -136,6 +143,7 @@ class InteractiveViewer extends StatefulWidget {
     this.scrollPhysics,
     this.scrollPhysicsScale,
     this.scrollPhysicsAutoAdjustBoundaries = true,
+    this.boundaryProvider,
   }) : assert(minScale > 0),
        assert(interactionEndFrictionCoefficient > 0),
        assert(minScale.isFinite),
@@ -192,6 +200,15 @@ class InteractiveViewer extends StatefulWidget {
   /// Defaults to [EdgeInsets.zero], which results in boundaries that are the
   /// exact same size and position as the [child].
   final EdgeInsets boundaryMargin;
+
+  /// Optional dynamic boundary: given the current visible rect and the child size (both in
+  /// child/scene coordinates), returns the document-space [Rect] the view should be confined
+  /// to, or null to fall back to [boundaryMargin].
+  ///
+  /// Used by discrete (page-at-a-time) mode to confine the view to the current spread: the
+  /// returned rect replaces the margin-inflated child rect in the per-frame clamp, reusing
+  /// the existing scroll-physics/bounce/fling. When null (the default) behaviour is unchanged.
+  final BoundaryProvider? boundaryProvider;
 
   /// Builds the child of this widget.
   ///
@@ -1221,6 +1238,18 @@ class InteractiveViewerState extends State<InteractiveViewer> with TickerProvide
     EdgeInsets? boundaryMargin,
     bool overrideAutoAdjustBoundaries = false,
   }) {
+    // Discrete (page-at-a-time) mode: a boundaryProvider supplies the confinement rect
+    // directly (in scene coordinates), replacing the margin-inflated child rect. Both clamp
+    // callers route through here, so this is the single authority. When the provider returns
+    // null we fall through to the unchanged margin path.
+    final provider = widget.boundaryProvider;
+    if (provider != null) {
+      final providerRect = provider(_currentVisibleRect(), _childSize());
+      if (providerRect != null) {
+        return _panBoundariesFromRect(providerRect, viewportSize, scale);
+      }
+    }
+
     // Use original boundaryMargin unless a specific one is passed for override.
     final baseMargin =
         (overrideAutoAdjustBoundaries && !widget.scrollPhysicsAutoAdjustBoundaries) || boundaryMargin == null
@@ -1254,6 +1283,43 @@ class InteractiveViewerState extends State<InteractiveViewer> with TickerProvide
         ? minY // Force centering
         : -((baseMargin.bottom * scale + extraBoundaryVertical)) + extraHeight;
     return Rect.fromLTRB(minX, minY, maxX, maxY).round10BitFrac();
+  }
+
+  /// The currently visible region in child/scene coordinates — the viewport mapped back
+  /// through the current transform. Passed to [InteractiveViewer.boundaryProvider] so it can
+  /// decide which spread to confine to.
+  Rect _currentVisibleRect() {
+    final viewport = _viewport;
+    return Rect.fromPoints(_transformer.toScene(viewport.topLeft), _transformer.toScene(viewport.bottomRight));
+  }
+
+  /// Derives pan boundaries from a confinement [rect] (scene coordinates) for the discrete
+  /// boundaryProvider path. This reproduces the margin path's centering math exactly — when
+  /// the scaled rect is larger than the viewport it pins to the edges; when smaller it
+  /// centers (min == max) — so the two paths stay consistent.
+  Rect _panBoundariesFromRect(Rect rect, Size viewportSize, double scale) {
+    // A 1px tolerance (vs 0.1px on the margin path): a dynamic spread rect accumulates more
+    // floating-point error (layout → spacing → scale), so lock the axis when the scaled rect
+    // is within 1px of the viewport extent instead of letting sub-pixel overflow jank scroll.
+    const tolerance = 1.0;
+
+    double minFor(double lo, double hi, double extent) {
+      final span = (hi - lo) * scale;
+      // Genuinely larger than the viewport → pin to the leading edge; otherwise center.
+      return span - extent >= tolerance ? lo * scale : (lo + hi) / 2 * scale - extent / 2;
+    }
+
+    double maxFor(double lo, double hi, double extent) {
+      final span = (hi - lo) * scale;
+      return span - extent >= tolerance ? hi * scale - extent : (lo + hi) / 2 * scale - extent / 2;
+    }
+
+    return Rect.fromLTRB(
+      minFor(rect.left, rect.right, viewportSize.width),
+      minFor(rect.top, rect.bottom, viewportSize.height),
+      maxFor(rect.left, rect.right, viewportSize.width),
+      maxFor(rect.top, rect.bottom, viewportSize.height),
+    ).round10BitFrac();
   }
 
   // Normalize ScrollMetrics such that minScrollExtent = 0 and pixels shift accordingly.

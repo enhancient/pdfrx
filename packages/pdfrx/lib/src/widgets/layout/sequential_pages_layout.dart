@@ -5,7 +5,7 @@ import 'package:pdfrx_engine/pdfrx_engine.dart';
 
 import '../pdf_viewer.dart';
 import '../pdf_viewer_params.dart';
-import 'fit_mode.dart';
+import 'pdf_fit_mode.dart';
 import 'pdf_layout.dart';
 
 /// Cross-axis alignment of pages that are narrower than the widest page.

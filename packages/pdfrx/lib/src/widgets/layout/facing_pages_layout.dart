@@ -4,7 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'package:pdfrx_engine/pdfrx_engine.dart';
 
 import '../pdf_viewer_params.dart';
-import 'fit_mode.dart';
+import 'pdf_fit_mode.dart';
 import 'pdf_layout.dart';
 import 'pdf_spread_layout.dart';
 

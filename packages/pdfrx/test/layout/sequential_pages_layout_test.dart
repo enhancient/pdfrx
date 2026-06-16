@@ -94,6 +94,13 @@ void main() {
       expect(p1, isNot(equals(p2)));
     });
 
+    test('params differing only in pageTransition are not ==', () {
+      const a = PdfViewerParams(pageTransition: PdfPageTransition.continuous);
+      const b = PdfViewerParams(pageTransition: PdfPageTransition.discrete);
+      expect(a, isNot(equals(b)));
+      expect(a.doChangesRequireReload(b), isTrue);
+    });
+
     test('params differing only in layout are not ==', () {
       const p1 = PdfViewerParams(layout: SequentialPagesLayout(scrollDirection: Axis.vertical));
       const p2 = PdfViewerParams(layout: SequentialPagesLayout(scrollDirection: Axis.horizontal));

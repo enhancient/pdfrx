@@ -2,7 +2,7 @@ import 'package:flutter/rendering.dart';
 import 'package:pdfrx_engine/pdfrx_engine.dart';
 
 import '../interactive_viewer.dart';
-import '../layout/fit_mode.dart';
+import '../layout/pdf_fit_mode.dart';
 import '../pdf_viewer.dart';
 import '../pdf_viewer_layout_metrics.dart';
 import '../pdf_viewer_params.dart';

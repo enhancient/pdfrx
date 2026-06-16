@@ -124,6 +124,15 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver, Single
                   onPressed: documentRef == null ? null : () => _changeLayoutType(),
                   icon: Icon(Icons.pages),
                 ),
+                // Toggle discrete (page-at-a-time) transitions. Best paired with the
+                // declarative FacingPagesLayout (cycle the layout button to that mode).
+                IconButton(
+                  visualDensity: visualDensity,
+                  tooltip: isDiscrete ? 'Discrete paging: ON' : 'Discrete paging: OFF',
+                  isSelected: isDiscrete,
+                  onPressed: documentRef == null ? null : () => setState(() => isDiscrete = !isDiscrete),
+                  icon: const Icon(Icons.auto_stories),
+                ),
                 IconButton(
                   visualDensity: visualDensity,
                   icon: const Icon(Icons.circle, color: Colors.red),
@@ -317,7 +326,10 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver, Single
                                 singlePagesFillAvailableWidth: true,
                               )
                             : null,
-                        fitMode: isDeclarativeLayout ? PdfFitMode.fit : PdfFitMode.none,
+                        fitMode: isDeclarativeLayout ? PdfFitMode.fit : PdfFitMode.fit,
+                        // Discrete mode self-enables its scroll physics (effectiveScrollPhysics),
+                        // so no scrollPhysics needs to be set here for it to work.
+                        pageTransition: isDiscrete ? PdfPageTransition.discrete : PdfPageTransition.continuous,
                         layoutPages: _layoutPages[_layoutTypeIndex],
                         scrollHorizontallyByMouseWheel: isHorizontalLayout,
                         pageAnchor: isHorizontalLayout ? PdfPageAnchor.left : PdfPageAnchor.top,
@@ -618,6 +630,10 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver, Single
   /// Declarative value-type layout (params.layout + params.fitMode) instead of a
   /// layoutPages closure.
   bool get isDeclarativeLayout => _layoutTypeIndex == 3;
+
+  /// Discrete (page-at-a-time) transitions. Toggled from the app bar; pairs with the
+  /// declarative FacingPagesLayout to page spread-by-spread.
+  bool isDiscrete = false;
 
   /// Page reading order; true to L-to-R that is commonly used by books like manga or such
   var isRightToLeftReadingOrder = false;
