@@ -52,11 +52,7 @@ class _PdfViewerScrollThumbState extends State<PdfViewerScrollThumb> {
   /// Label for the default thumb: the current page, or a page range like "2–3" when a facing/spread
   /// layout groups pages. A custom [PdfViewerScrollThumb.thumbBuilder] still receives the single
   /// `pageNumber` (unchanged) and can call `controller.currentPageRange` itself if it wants a range.
-  String _defaultLabel() {
-    final range = widget.controller.currentPageRange;
-    if (range == null) return '';
-    return range.from == range.to ? '${range.from}' : '${range.from}–${range.to}';
-  }
+  String _defaultLabel() => widget.controller.currentPageRange?.label ?? '';
 
   Widget _buildVertical(BuildContext context) {
     final thumbSize = widget.thumbSize ?? const Size(25, 40);

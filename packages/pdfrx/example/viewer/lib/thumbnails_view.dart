@@ -16,14 +16,14 @@ class ThumbnailsView extends StatelessWidget {
 
   /// Groups consecutive pages into spread ranges using the controller. Falls back to one page per
   /// range when the controller is unavailable or the layout doesn't group pages.
-  List<({int from, int to})> _ranges(int pageCount) {
-    final ranges = <({int from, int to})>[];
+  List<PdfPageRange> _ranges(int pageCount) {
+    final ranges = <PdfPageRange>[];
     var page = 1;
     while (page <= pageCount) {
-      final r = controller?.pageRangeOf(page) ?? (from: page, to: page);
-      final to = r.to >= page ? r.to : page;
-      ranges.add((from: page, to: to));
-      page = to + 1;
+      final r = controller?.pageRangeOf(page) ?? PdfPageRange(page, page);
+      final last = r.lastPageNumber >= page ? r.lastPageNumber : page;
+      ranges.add(PdfPageRange(page, last));
+      page = last + 1;
     }
     return ranges;
   }
@@ -53,19 +53,23 @@ class ThumbnailsView extends StatelessWidget {
                         // Highlight every spread/page that overlaps the range currently visible in
                         // the viewport (current can span several spreads when more than one is on
                         // screen).
-                        final isCurrent = current != null && range.from <= current.to && range.to >= current.from;
-                        final label = range.from == range.to ? '${range.from}' : '${range.from}–${range.to}';
+                        final isCurrent =
+                            current != null &&
+                            range.firstPageNumber <= current.lastPageNumber &&
+                            range.lastPageNumber >= current.firstPageNumber;
+                        final label = range.label;
                         return Container(
                           margin: const EdgeInsets.all(8),
                           height: 240,
                           child: Column(
                             children: [
                               SizedBox(
-                                key: ValueKey('thumb_${document.hashCode}_${range.from}_${range.to}'),
+                                key: ValueKey('thumb_${document.hashCode}_${range.firstPageNumber}_${range.lastPageNumber}'),
                                 height: 220,
                                 child: InkWell(
-                                  onTap: () => controller?.goToPage(pageNumber: range.from, anchor: PdfPageAnchor.top),
-                                  onDoubleTap: () => onDoubleTap(document, range.from),
+                                  onTap: () =>
+                                      controller?.goToPage(pageNumber: range.firstPageNumber, anchor: PdfPageAnchor.top),
+                                  onDoubleTap: () => onDoubleTap(document, range.firstPageNumber),
                                   child: DecoratedBox(
                                     decoration: BoxDecoration(
                                       border: Border.all(color: isCurrent ? Colors.blue : Colors.transparent, width: 2),
@@ -73,7 +77,7 @@ class ThumbnailsView extends StatelessWidget {
                                     child: Row(
                                       mainAxisAlignment: MainAxisAlignment.center,
                                       children: [
-                                        for (var p = range.from; p <= range.to; p++)
+                                        for (var p = range.firstPageNumber; p <= range.lastPageNumber; p++)
                                           Expanded(
                                             child: PdfPageView(
                                               document: document,

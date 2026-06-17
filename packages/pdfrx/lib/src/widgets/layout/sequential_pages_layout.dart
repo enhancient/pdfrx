@@ -119,7 +119,7 @@ class SequentialPagesLayout extends PdfLayout {
     main += margin;
 
     final documentSize = isVertical ? Size(maxCross + margin * 2, main) : Size(main, maxCross + margin * 2);
-    return PdfPageLayout(pageLayouts: rects, documentSize: documentSize);
+    return PdfPageLayout(pageLayouts: rects, documentSize: documentSize, primaryAxis: scrollDirection);
   }
 
   /// Per-page scale to bake into geometry for the given [fitMode].

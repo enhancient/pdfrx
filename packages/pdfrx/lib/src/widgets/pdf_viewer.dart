@@ -263,6 +263,8 @@ class _PdfViewerState extends State<PdfViewer>
   Timer? _discreteReflowTimer; // debounces the zoom-driven discrete spacing reflow
   bool _resizingDiscrete = false; // true while a discrete viewport resize is in flight (cull neighbours)
   Timer? _discreteResizeEndTimer; // clears _resizingDiscrete shortly after the resize settles
+  bool _discreteZooming = false; // true around a wheel/pointer zoom via the scroll-interaction delegate
+  Timer? _discreteZoomEndTimer; // clears _discreteZooming after the delegate's zoom settles
   double _discreteWheelAccum = 0; // accumulated transition-axis scroll toward the next page step
   int _discreteWheelSign = 0; // direction the accumulator is charging (reset on reversal)
   Timer? _discreteWheelCooldown; // paces mouse-wheel notches (no inertia) between steps
@@ -509,6 +511,7 @@ class _PdfViewerState extends State<PdfViewer>
     _interactionEndedTimer?.cancel();
     _discreteReflowTimer?.cancel();
     _discreteResizeEndTimer?.cancel();
+    _discreteZoomEndTimer?.cancel();
     _discreteWheelCooldown?.cancel();
     _discreteWheelIdleTimer?.cancel();
     _imageCache.cancelAllPendingRenderings();
@@ -999,6 +1002,22 @@ class _PdfViewerState extends State<PdfViewer>
     return max(_layoutMetrics.minScale, fit);
   }
 
+  /// [_layoutMetrics] with the discrete fit floor ([_effectiveMinScale]) applied. Passed to the
+  /// scroll-interaction delegate's `zoom()` (which clamps the target to `minScale`) so wheel/pinch
+  /// zoom through the delegate can't shrink a discrete unit below its fit scale — matching the
+  /// InteractiveViewer's own min-scale clamp.
+  PdfViewerLayoutMetrics get _effectiveLayoutMetrics {
+    final m = _layoutMetrics;
+    final minScale = _effectiveMinScale;
+    if (minScale == m.minScale) return m;
+    return PdfViewerLayoutMetrics(
+      minScale: minScale,
+      maxScale: m.maxScale,
+      coverScale: m.coverScale,
+      alternativeFitScale: m.alternativeFitScale,
+    );
+  }
+
   int _calcInitialPageNumber() {
     int? pageNumber;
     final calculateInitialPageNumber = widget.params.calculateInitialPageNumber;
@@ -1108,16 +1127,32 @@ class _PdfViewerState extends State<PdfViewer>
     if (widget.params.pageTransition == PdfPageTransition.discrete) {
       _interactionStartPage = _gotoTargetPageNumber ?? _pageNumber;
       _hadScaleChangeInInteraction = false;
+      // A 2+ finger gesture is a pinch/zoom: start culling neighbours on the very first frame.
+      // Otherwise the cull only latches once the scale-change passes a threshold a frame or two in,
+      // and the initial focal-zoom (with the boundary still extended toward the neighbour) flashes
+      // the single edge neighbour on the first/last unit. (Trackpad/wheel scroll is one pointer and
+      // routed to page navigation, so this only fires for an actual pinch.)
+      if (details.pointerCount >= 2) {
+        _isActivelyZooming = true;
+        _markDiscreteZoom();
+      }
     }
     widget.params.onInteractionStart?.call(details);
   }
 
   void _onInteractionUpdate(ScaleUpdateDetails details) {
     if (widget.params.pageTransition == PdfPageTransition.discrete) {
-      // ScaleUpdateDetails.scale is cumulative from gesture start (1.0 == no pinch).
+      // ScaleUpdateDetails.scale is cumulative from gesture start. A single-pointer drag reports an
+      // exact 1.0; any deviation means a pinch — so cull neighbours from the very first deviated
+      // frame (the cull latched only once it passed 0.01, leaving an opening at the start that
+      // flashed the single edge neighbour on the first/last unit). _markDiscreteZoom also keeps the
+      // cull latched a short window past the last update to cover the settle (snap / reflow / clamp).
+      if (details.scale != 1.0) {
+        _markDiscreteZoom();
+      }
       if ((details.scale - 1.0).abs() > 0.01) {
         _hadScaleChangeInInteraction = true;
-        _isActivelyZooming = true; // cull neighbours while pinching (zoom-out overshoot)
+        _isActivelyZooming = true;
       }
     }
     widget.params.onInteractionUpdate?.call(details);
@@ -1137,9 +1172,13 @@ class _PdfViewerState extends State<PdfViewer>
       return false;
     }
     // _isActivelyZooming is cleared the moment the pinch ends, but the scale snap-back keeps
-    // animating the zoom afterwards — cull through it too so a transient scale can't flash the
-    // neighbours (the snap is scale-only; a pan fling is intentionally not culled).
-    if (_isActivelyZooming || _resizingDiscrete || (_interactiveViewerState?.isSnapping ?? false)) return true;
+    // animating the zoom afterwards, and a wheel/pointer zoom through the scroll-interaction
+    // delegate (which a physics delegate animates over several frames) churns the matrix too — cull
+    // through both so a transient scale can't flash the neighbours (zoom-only; a pan fling is
+    // intentionally not culled).
+    if (_isActivelyZooming || _resizingDiscrete || _discreteZooming || (_interactiveViewerState?.isSnapping ?? false)) {
+      return true;
+    }
     final vertical = _discreteIsVertical(_layout!);
     final unit = _discreteUnitBounds(_pageNumber!, _layout!);
     final unitPrimary = vertical ? unit.height : unit.width;
@@ -1180,8 +1219,9 @@ class _PdfViewerState extends State<PdfViewer>
   // than re-centering or re-fitting.
   // ===========================================================================
 
-  /// Whether discrete transitions move along the vertical axis (taller-than-wide document).
-  bool _discreteIsVertical(PdfPageLayout layout) => layout.documentSize.height >= layout.documentSize.width;
+  /// Whether discrete transitions move along the vertical axis — the layout's declared
+  /// [PdfPageLayout.primaryAxis] (which defaults to the document's longer dimension).
+  bool _discreteIsVertical(PdfPageLayout layout) => layout.primaryAxis == Axis.vertical;
 
   /// Document-space bounds of the discrete unit containing [pageNumber] — the spread for a
   /// [PdfSpreadLayout], otherwise the single page.
@@ -1383,7 +1423,7 @@ class _PdfViewerState extends State<PdfViewer>
     // fixed fraction of the viewport (a fixed extension can't carry a unit past the most-visible
     // threshold when the main axis is very long). On release _handleDiscretePageTransition decides
     // whether to commit or snap back.
-    if (_isActiveGesture && !_hadScaleChangeInInteraction) {
+    if (_isActiveGesture && !_hadScaleChangeInInteraction && !_discreteZooming) {
       final vertical = _discreteIsVertical(layout);
       final prevPage = _adjacentDiscretePage(pageNumber, layout, -1);
       final nextPage = _adjacentDiscretePage(pageNumber, layout, 1);
@@ -1805,11 +1845,11 @@ class _PdfViewerState extends State<PdfViewer>
   /// First and last page numbers whose layout currently intersects the viewport, i.e. the range of
   /// pages on screen — `(3, 5)` when pages 3–5 are visible, `(2, 2)` for a single page filling the
   /// view. Works for any layout (sequential, facing/spread). Null when nothing is laid out yet.
-  ({int from, int to})? _visiblePageRange() {
+  PdfPageRange? _visiblePageRange() {
     final layout = _layout;
     if (layout == null || _viewSize == null) return null;
     final visibleRect = _visibleRect;
-    final isHorizontal = layout.documentSize.width > layout.documentSize.height;
+    final isHorizontal = layout.primaryAxis == Axis.horizontal;
     int? from, to;
     for (var i = 0; i < layout.pageLayouts.length; i++) {
       if (_calcPrimaryAxisVisibility(layout.pageLayouts[i], visibleRect, isHorizontal) > 0) {
@@ -1818,7 +1858,7 @@ class _PdfViewerState extends State<PdfViewer>
       }
     }
     if (from == null || to == null) return null;
-    return (from: from, to: to);
+    return PdfPageRange(from, to);
   }
 
   int? _guessCurrentPageNumber() {
@@ -2654,7 +2694,8 @@ class _PdfViewerState extends State<PdfViewer>
         final scaleFactor = (rawScaleFactor - 1.0) * dampening + 1.0;
 
         // NOTE: _onWheelDelta may be called from other widget's context and localPosition may be incorrect.
-        _interactionDelegate?.zoom(scaleFactor, _controller!.globalToLocal(event.position)!, _layoutMetrics);
+        _markDiscreteZoom();
+        _interactionDelegate?.zoom(scaleFactor, _controller!.globalToLocal(event.position)!, _effectiveLayoutMetrics);
         return;
       }
 
@@ -2697,6 +2738,19 @@ class _PdfViewerState extends State<PdfViewer>
     }
   }
 
+  /// Marks a discrete-mode zoom (via the scroll-interaction delegate) in progress so neighbours stay
+  /// culled while it animates. The delegate's zoom may animate over several frames (physics
+  /// delegate), so keep it set until a short quiet window after the last zoom event.
+  void _markDiscreteZoom() {
+    if (widget.params.pageTransition != PdfPageTransition.discrete) return;
+    _discreteZooming = true;
+    _discreteZoomEndTimer?.cancel();
+    _discreteZoomEndTimer = Timer(const Duration(milliseconds: 250), () {
+      _discreteZooming = false;
+      if (mounted) _invalidate();
+    });
+  }
+
   void _onPointerScale(PointerScaleEvent event) {
     if (!widget.params.scaleEnabled) {
       return;
@@ -2706,7 +2760,8 @@ class _PdfViewerState extends State<PdfViewer>
     try {
       final dampening = widget.params.scaleByPointerScale;
       final scaleFactor = (event.scale - 1.0) * dampening + 1.0;
-      _interactionDelegate?.zoom(scaleFactor, event.localPosition, _layoutMetrics);
+      _markDiscreteZoom();
+      _interactionDelegate?.zoom(scaleFactor, event.localPosition, _effectiveLayoutMetrics);
     } finally {
       _stopInteraction();
     }
@@ -4782,9 +4837,16 @@ enum PdfTextSelectionAnchorType { a, b }
 
 /// Defines page layout.
 class PdfPageLayout {
-  PdfPageLayout({required this.pageLayouts, required this.documentSize});
+  PdfPageLayout({required this.pageLayouts, required this.documentSize, Axis? primaryAxis})
+    : primaryAxis = primaryAxis ?? (documentSize.height >= documentSize.width ? Axis.vertical : Axis.horizontal);
   final List<Rect> pageLayouts;
   final Size documentSize;
+
+  /// The axis pages flow along — the scroll axis in continuous mode and the page-transition axis in
+  /// discrete (page-at-a-time) mode. Defaults to the document's longer dimension; layout strategies
+  /// pass an explicit axis (e.g. [SequentialPagesLayout.scrollDirection]) so a custom or
+  /// non-square layout can declare its direction instead of relying on the aspect-ratio guess.
+  final Axis primaryAxis;
 
   @override
   bool operator ==(Object other) {
@@ -4795,6 +4857,34 @@ class PdfPageLayout {
 
   @override
   int get hashCode => pageLayouts.hashCode ^ documentSize.hashCode;
+}
+
+/// An inclusive range of 1-based page numbers — a single page (`from == to`) or a facing-page
+/// spread / visible run. Returned by [PdfViewerController.currentPageRange] and
+/// [PdfSpreadLayout.getPageRange]; use [label] for a "2–3" / "5" display string.
+@immutable
+class PdfPageRange {
+  const PdfPageRange(this.firstPageNumber, this.lastPageNumber);
+
+  /// First (1-based) page of the range.
+  final int firstPageNumber;
+
+  /// Last (1-based) page of the range, inclusive.
+  final int lastPageNumber;
+
+  /// Display label: the page number for a single page, or "first–last" for a range.
+  String get label =>
+      firstPageNumber == lastPageNumber ? '$firstPageNumber' : '$firstPageNumber–$lastPageNumber';
+
+  @override
+  bool operator ==(Object other) =>
+      other is PdfPageRange && other.firstPageNumber == firstPageNumber && other.lastPageNumber == lastPageNumber;
+
+  @override
+  int get hashCode => Object.hash(firstPageNumber, lastPageNumber);
+
+  @override
+  String toString() => 'PdfPageRange($firstPageNumber, $lastPageNumber)';
 }
 
 /// Represents the result of the hit test on the page.
@@ -4911,24 +5001,23 @@ class PdfViewerController extends ValueListenable<Matrix4> {
   ///
   /// Additive and backwards compatible: [pageNumber] and [onPageChanged] are unchanged; callers
   /// that don't need ranges can ignore this. Use [pageRangeOf] for the spread range of one page.
-  ({int from, int to})? get currentPageRange {
+  PdfPageRange? get currentPageRange {
     if (_state.widget.params.pageTransition == PdfPageTransition.discrete) {
       return pageRangeOf(_state._pageNumber);
     }
     return _state._visiblePageRange();
   }
 
-  /// The first and last page numbers of the spread containing [pageNumber] (see [currentPageRange]).
-  /// Returns null if [pageNumber] is null, and `(from: pageNumber, to: pageNumber)` when the active
-  /// layout does not group pages into spreads.
-  ({int from, int to})? pageRangeOf(int? pageNumber) {
+  /// The page range of the spread containing [pageNumber] (see [currentPageRange]). Returns null if
+  /// [pageNumber] is null, and a single-page range (`from == to`) when the active layout does not
+  /// group pages into spreads.
+  PdfPageRange? pageRangeOf(int? pageNumber) {
     if (pageNumber == null) return null;
     final layout = _state._layout;
     if (layout is PdfSpreadLayout && pageNumber >= 1 && pageNumber <= layout.pageLayouts.length) {
-      final pages = layout.pagesOfSpread(layout.spreadIndexOfPage(pageNumber));
-      if (pages.isNotEmpty) return (from: pages.first, to: pages.last);
+      return layout.getPageRange(pageNumber);
     }
-    return (from: pageNumber, to: pageNumber);
+    return PdfPageRange(pageNumber, pageNumber);
   }
 
   /// The document reference associated to the [PdfViewer].

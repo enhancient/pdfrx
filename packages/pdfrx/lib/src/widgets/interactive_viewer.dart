@@ -1104,19 +1104,26 @@ class InteractiveViewerState extends State<InteractiveViewer> with TickerProvide
             final maxX = math.max(-startPb.left, -startPb.right);
             final minY = math.min(-startPb.top, -startPb.bottom);
             final maxY = math.max(-startPb.top, -startPb.bottom);
-            final pivotX = (startT.dx - maxX).abs() < 1.0
-                ? _viewport
-                      .left // pinned to the document left / start
+            // When an axis fits the viewport (content shorter than the viewport on that axis), the
+            // pan range collapses (min == max) and the content is centred — there is no edge to pin
+            // to, so scale about the viewport centre to keep it centred. Pinning to an edge here is
+            // what flashed a fitting page to the top (first unit) / bottom (last unit) of the
+            // viewport. Only an axis that actually overflows is anchored to whichever edge it sits on.
+            final fitsX = (maxX - minX).abs() < 1.0;
+            final fitsY = (maxY - minY).abs() < 1.0;
+            final pivotX = fitsX
+                ? _viewport.center.dx // axis fits → keep centred
+                : (startT.dx - maxX).abs() < 1.0
+                ? _viewport.left // pinned to the document left / start
                 : (startT.dx - minX).abs() < 1.0
-                ? _viewport
-                      .right // pinned to the document right / end
+                ? _viewport.right // pinned to the document right / end
                 : _snapFocalPoint.dx;
-            final pivotY = (startT.dy - maxY).abs() < 1.0
-                ? _viewport
-                      .top // pinned to the document top
+            final pivotY = fitsY
+                ? _viewport.center.dy // axis fits → keep centred
+                : (startT.dy - maxY).abs() < 1.0
+                ? _viewport.top // pinned to the document top
                 : (startT.dy - minY).abs() < 1.0
-                ? _viewport
-                      .bottom // pinned to the document bottom
+                ? _viewport.bottom // pinned to the document bottom
                 : _snapFocalPoint.dy;
             pivotScreen = Offset(pivotX, pivotY);
           }

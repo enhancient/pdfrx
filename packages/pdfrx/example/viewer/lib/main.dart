@@ -317,6 +317,7 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver, Single
                       controller: controller,
                       fontManager: _fontManager,
                       params: PdfViewerParams(
+                        //interactionDelegateProvider: PdfViewerScrollInteractionDelegateProviderPhysics(),
                         // Declarative value-type layout. When non-null it takes
                         // precedence over layoutPages
                         layout: isDeclarativeLayout
@@ -842,9 +843,5 @@ class _MainPageState extends State<MainPage> with WidgetsBindingObserver, Single
 
   /// Label for the range of pages currently visible in the viewport: "5" for a single page, "3–5"
   /// when several are on screen.
-  static String _pageRangeLabel(PdfViewerController controller) {
-    final range = controller.currentPageRange;
-    if (range == null) return '';
-    return range.from == range.to ? '${range.from}' : '${range.from}–${range.to}';
-  }
+  static String _pageRangeLabel(PdfViewerController controller) => controller.currentPageRange?.label ?? '';
 }

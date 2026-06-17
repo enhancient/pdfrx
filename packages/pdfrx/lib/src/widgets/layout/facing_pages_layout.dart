@@ -63,6 +63,7 @@ class FacingPagesLayout extends PdfLayout {
         documentSize: Size.zero,
         spreadBounds: const [],
         pageToSpread: const [],
+        primaryAxis: Axis.vertical,
       );
     }
 
@@ -201,6 +202,7 @@ class FacingPagesLayout extends PdfLayout {
       documentSize: documentSize,
       spreadBounds: spreadBounds,
       pageToSpread: pageToSpread,
+      primaryAxis: Axis.vertical,
     );
   }
 

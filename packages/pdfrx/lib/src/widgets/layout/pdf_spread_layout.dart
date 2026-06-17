@@ -19,6 +19,7 @@ class PdfSpreadLayout extends PdfPageLayout {
     required super.documentSize,
     required this.spreadBounds,
     required this.pageToSpread,
+    super.primaryAxis,
   });
 
   /// Bounding rect of each spread, in document coordinates (indexed by spread index).
@@ -56,6 +57,20 @@ class PdfSpreadLayout extends PdfPageLayout {
       if (pageToSpread[i] == spreadIndex) pages.add(i + 1);
     }
     return pages;
+  }
+
+  /// The first–last page range of the spread containing the 1-based [pageNumber] (e.g. `2–3` for a
+  /// facing pair, `5–5` for a lone page).
+  PdfPageRange getPageRange(int pageNumber) {
+    final spread = spreadIndexOfPage(pageNumber);
+    var first = -1, last = -1;
+    for (var i = 0; i < pageToSpread.length; i++) {
+      if (pageToSpread[i] == spread) {
+        if (first == -1) first = i + 1;
+        last = i + 1;
+      }
+    }
+    return PdfPageRange(first, last);
   }
 
   @override
