@@ -22,7 +22,6 @@ import 'interactive_viewer.dart' as iv;
 import 'internals/pdf_error_widget.dart';
 import 'internals/pdf_viewer_key_handler.dart';
 import 'internals/widget_size_sniffer.dart';
-import 'layout/pdf_fit_mode.dart';
 import 'layout/pdf_spread_layout.dart';
 import 'pdf_page_links_overlay.dart';
 import 'pdf_page_transition.dart';
@@ -995,11 +994,17 @@ class _PdfViewerState extends State<PdfViewer>
     if (widget.params.pageTransition != PdfPageTransition.discrete) {
       return _layoutMetrics.minScale;
     }
-    final fit = switch (widget.params.fitMode) {
-      PdfFitMode.fill || PdfFitMode.cover => _layoutMetrics.coverScale,
-      PdfFitMode.fit || PdfFitMode.none => _layoutMetrics.alternativeFitScale ?? _layoutMetrics.coverScale,
-    };
-    return max(_layoutMetrics.minScale, fit);
+    // Floor at the *current unit's own* fit, computed fresh per-page via the same source as the
+    // discrete home zoom (_discreteFitScale → calculateMetrics(pageNumber: unit).minScale). Reading
+    // the cached _layoutMetrics here would lag the current unit: it is refreshed only on
+    // build/layout/reflow (never by _setCurrentPageNumber) and is pinned to the origin page during a
+    // transition. For mixed page sizes in fitMode none/cover — where per-page fit genuinely differs
+    // (fill/fit normalise it into geometry) — that staleness clamps a larger target page above its
+    // own fit, so it can't be shown whole. Sourcing the floor per-unit keeps the live clamp
+    // consistent with the home zoom.
+    final unit = _gotoTargetPageNumber ?? _pageNumber;
+    if (unit == null) return _layoutMetrics.minScale;
+    return _discreteFitScale(unit);
   }
 
   /// [_layoutMetrics] with the discrete fit floor ([_effectiveMinScale]) applied. Passed to the

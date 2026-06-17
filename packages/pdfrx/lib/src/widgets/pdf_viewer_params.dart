@@ -38,7 +38,8 @@ class PdfViewerParams {
     @Deprecated('Use sizeDelegateProvider: PdfViewerSizeDelegateProviderLegacy(maxScale: ...) instead') this.maxScale,
     @Deprecated('Use sizeDelegateProvider: PdfViewerSizeDelegateProviderLegacy(minScale: ...) instead') this.minScale,
     @Deprecated(
-      'Use sizeDelegateProvider: PdfViewerSizeDelegateProviderLegacy(useAlternativeFitScaleAsMinScale: ...) instead',
+      'Prefer fitMode: PdfFitMode.fit (true) / PdfFitMode.none (false). For exact legacy behavior, '
+      'use sizeDelegateProvider: PdfViewerSizeDelegateProviderLegacy(useAlternativeFitScaleAsMinScale: ...).',
     )
     this.useAlternativeFitScaleAsMinScale,
     this.panAxis = PanAxis.free,
@@ -223,13 +224,24 @@ class PdfViewerParams {
   @Deprecated('Use sizeDelegateProvider: PdfViewerSizeDelegateProviderLegacy(minScale: ...) instead')
   final double? minScale;
 
-  /// If true, the minimum scale is set to the calculated [PdfViewerController.alternativeFitScale].
+  /// If true, the minimum scale is floored at the "fit page" scale
+  /// ([PdfViewerController.alternativeFitScale]) so the user cannot zoom out past a whole page.
   ///
-  /// If the minimum scale is small value, it makes many pages visible inside the view and it finally
-  /// renders many pages at once. It may make the viewer to be slow or even crash due to high memory consumption.
-  /// So, it is recommended to set this to false if you want to show PDF documents with many pages.
+  /// **Prefer [fitMode].** This boolean is a *policy* that conflates two things — computing the
+  /// fit-page scalar and using it as the min scale. [PdfFitMode] expresses that policy
+  /// declaratively (and also fits per-page geometry for mixed page sizes):
+  /// - `useAlternativeFitScaleAsMinScale: true`  ≈ `fitMode: PdfFitMode.fit`
+  /// - `useAlternativeFitScaleAsMinScale: false` ≈ `fitMode: PdfFitMode.none` (honors [minScale])
+  ///
+  /// Flooring the min scale at fit-page avoids zooming out so far that many pages render at once,
+  /// which can be slow or memory-heavy on large documents.
+  ///
+  /// For pixel-exact legacy behavior (including the quirk that an explicit [minScale] is ignored
+  /// while this is true), use
+  /// `sizeDelegateProvider: PdfViewerSizeDelegateProviderLegacy(useAlternativeFitScaleAsMinScale: ...)`.
   @Deprecated(
-    'Use sizeDelegateProvider: PdfViewerSizeDelegateProviderLegacy(useAlternativeFitScaleAsMinScale: ...) instead',
+    'Prefer fitMode: PdfFitMode.fit (true) / PdfFitMode.none (false). For exact legacy behavior, '
+    'use sizeDelegateProvider: PdfViewerSizeDelegateProviderLegacy(useAlternativeFitScaleAsMinScale: ...).',
   )
   final bool? useAlternativeFitScaleAsMinScale;
 
