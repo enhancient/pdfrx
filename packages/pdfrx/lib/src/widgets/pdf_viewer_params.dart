@@ -812,6 +812,7 @@ class PdfViewerParams {
         other.verticalCacheExtent != verticalCacheExtent ||
         other.linkHandlerParams != linkHandlerParams ||
         other.scrollPhysics != scrollPhysics ||
+        other.scrollPhysicsScale != scrollPhysicsScale ||
         other.interactionDelegateProvider != interactionDelegateProvider ||
         other.sizeDelegateProvider != sizeDelegateProvider ||
         other.zoomStepsDelegateProvider != zoomStepsDelegateProvider;
@@ -888,6 +889,7 @@ class PdfViewerParams {
         other.behaviorControlParams == behaviorControlParams &&
         other.forceReload == forceReload &&
         other.scrollPhysics == scrollPhysics &&
+        other.scrollPhysicsScale == scrollPhysicsScale &&
         other.interactionDelegateProvider == interactionDelegateProvider &&
         other.sizeDelegateProvider == sizeDelegateProvider &&
         other.zoomStepsDelegateProvider == zoomStepsDelegateProvider;
@@ -962,6 +964,7 @@ class PdfViewerParams {
         behaviorControlParams.hashCode ^
         forceReload.hashCode ^
         scrollPhysics.hashCode ^
+        scrollPhysicsScale.hashCode ^
         interactionDelegateProvider.hashCode ^
         sizeDelegateProvider.hashCode ^
         zoomStepsDelegateProvider.hashCode;

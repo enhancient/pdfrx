@@ -753,7 +753,7 @@ class _PdfViewerState extends State<PdfViewer>
     // clamp centres it when it fits and keeps it in-bounds when it overflows — the same job the
     // InteractiveViewer's boundaryProvider does during interaction, applied here for goto/resize.
     final discretePage = widget.params.pageTransition == PdfPageTransition.discrete
-        ? (_gotoTargetPageNumber ?? _pageNumber)
+        ? _focusedPageNumber
         : null;
     if (discretePage != null && _layout != null && discretePage >= 1 && discretePage <= _layout!.pageLayouts.length) {
       final unit = _discreteEffectiveBounds(discretePage, _layout!);
@@ -921,7 +921,7 @@ class _PdfViewerState extends State<PdfViewer>
         newState: newSnapshot,
         currentZoom: _currentZoom,
         oldVisibleRect: oldVisibleRect,
-        anchorPageNumber: currentPageNumber ?? _gotoTargetPageNumber ?? _pageNumber,
+        anchorPageNumber: currentPageNumber ?? _focusedPageNumber,
         isLayoutChanged: isLayoutChanged,
         isViewSizeChanged: isViewSizeChanged,
       );
@@ -1002,7 +1002,7 @@ class _PdfViewerState extends State<PdfViewer>
     // (fill/fit normalise it into geometry) — that staleness clamps a larger target page above its
     // own fit, so it can't be shown whole. Sourcing the floor per-unit keeps the live clamp
     // consistent with the home zoom.
-    final unit = _gotoTargetPageNumber ?? _pageNumber;
+    final unit = _focusedPageNumber;
     if (unit == null) return _layoutMetrics.minScale;
     return _discreteFitScale(unit);
   }
@@ -1130,7 +1130,7 @@ class _PdfViewerState extends State<PdfViewer>
     _requestFocus();
     _isActiveGesture = true;
     if (widget.params.pageTransition == PdfPageTransition.discrete) {
-      _interactionStartPage = _gotoTargetPageNumber ?? _pageNumber;
+      _interactionStartPage = _focusedPageNumber;
       _hadScaleChangeInInteraction = false;
       // A 2+ finger gesture is a pinch/zoom: start culling neighbours on the very first frame.
       // Otherwise the cull only latches once the scale-change passes a threshold a frame or two in,
@@ -1381,7 +1381,7 @@ class _PdfViewerState extends State<PdfViewer>
     }
     if ((_discreteSpacingZoom - _currentZoom).abs() / _currentZoom < 0.01) return; // already in sync
 
-    final anchorPage = _gotoTargetPageNumber ?? _pageNumber;
+    final anchorPage = _focusedPageNumber;
     if (anchorPage == null || anchorPage < 1 || anchorPage > _layout!.pageLayouts.length) return;
 
     final vertical = _discreteIsVertical(_layout!);
@@ -1416,7 +1416,7 @@ class _PdfViewerState extends State<PdfViewer>
   /// [iv.BoundaryProvider]; returns null to defer to the static margin path.
   Rect? _getDiscreteBoundaryRect(Rect visibleRect, Size childSize) {
     final layout = _layout;
-    final pageNumber = _gotoTargetPageNumber ?? _pageNumber;
+    final pageNumber = _focusedPageNumber;
     if (layout == null || pageNumber == null || pageNumber < 1 || pageNumber > layout.pageLayouts.length) {
       return null;
     }
@@ -1654,7 +1654,7 @@ class _PdfViewerState extends State<PdfViewer>
   /// continuous mode and for intra-page panning here.
   void _handleDiscreteWheel(PointerScrollEvent event) {
     final layout = _layout;
-    final current = _gotoTargetPageNumber ?? _pageNumber;
+    final current = _focusedPageNumber;
     if (layout == null || current == null || _viewSize == null) return;
 
     final vertical = _discreteIsVertical(layout);
@@ -1731,7 +1731,7 @@ class _PdfViewerState extends State<PdfViewer>
   /// suppression (there is no InteractiveViewer fling to cancel on the wheel path).
   Future<void> _stepDiscretePage(int direction) async {
     final layout = _layout;
-    final current = _gotoTargetPageNumber ?? _pageNumber;
+    final current = _focusedPageNumber;
     if (layout == null || current == null || _viewSize == null) return;
     final target = _adjacentDiscretePage(current, layout, direction);
     if (target == null) return; // already at the first/last unit
@@ -1749,6 +1749,12 @@ class _PdfViewerState extends State<PdfViewer>
   /// Last page number that is explicitly requested to go to.
   int? _gotoTargetPageNumber;
 
+  /// The page (or spread anchor) currently in focus, in either scroll mode: the pending goto target
+  /// while a navigation is in flight, else the settled current page. (Note: [_recalculateMetrics]
+  /// deliberately uses the *reversed* precedence `_pageNumber ?? _gotoTargetPageNumber` — do not
+  /// unify it with this getter.)
+  int? get _focusedPageNumber => _gotoTargetPageNumber ?? _pageNumber;
+
   bool _onKey(PdfViewerKeyHandlerParams params, LogicalKeyboardKey key, bool isRealKeyPress) {
     final result = widget.params.onKey?.call(params, key, isRealKeyPress);
     if (result != null) {
@@ -1759,14 +1765,14 @@ class _PdfViewerState extends State<PdfViewer>
     const repeatInterval = Duration(milliseconds: 100);
     switch (key) {
       case LogicalKeyboardKey.pageUp:
-        _goToPage(pageNumber: (_gotoTargetPageNumber ?? _pageNumber!) - 1, duration: repeatInterval);
+        _goToPage(pageNumber: _focusedPageNumber! - 1, duration: repeatInterval);
         return true;
       case LogicalKeyboardKey.pageDown:
-        _goToPage(pageNumber: (_gotoTargetPageNumber ?? _pageNumber!) + 1, duration: repeatInterval);
+        _goToPage(pageNumber: _focusedPageNumber! + 1, duration: repeatInterval);
         return true;
       case LogicalKeyboardKey.space:
         final move = HardwareKeyboard.instance.isShiftPressed ? -1 : 1;
-        _goToPage(pageNumber: (_gotoTargetPageNumber ?? _pageNumber!) + move, duration: repeatInterval);
+        _goToPage(pageNumber: _focusedPageNumber! + move, duration: repeatInterval);
         return true;
       case LogicalKeyboardKey.home:
         _goToPage(pageNumber: 1, duration: repeatInterval);
@@ -2014,6 +2020,8 @@ class _PdfViewerState extends State<PdfViewer>
   }
 
   void _recalculateMetrics() {
+    // Precedence is deliberately the *reverse* of [_focusedPageNumber]: here the settled page wins
+    // over an in-flight goto target, so metrics don't change mid-transition. Do not unify the two.
     final pageNumber = _pageNumber ?? _gotoTargetPageNumber;
 
     _layoutMetrics = _sizeDelegate!.calculateMetrics(

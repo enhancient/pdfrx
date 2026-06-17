@@ -1104,27 +1104,25 @@ class InteractiveViewerState extends State<InteractiveViewer> with TickerProvide
             final maxX = math.max(-startPb.left, -startPb.right);
             final minY = math.min(-startPb.top, -startPb.bottom);
             final maxY = math.max(-startPb.top, -startPb.bottom);
-            // When an axis fits the viewport (content shorter than the viewport on that axis), the
-            // pan range collapses (min == max) and the content is centred — there is no edge to pin
-            // to, so scale about the viewport centre to keep it centred. Pinning to an edge here is
-            // what flashed a fitting page to the top (first unit) / bottom (last unit) of the
-            // viewport. Only an axis that actually overflows is anchored to whichever edge it sits on.
-            final fitsX = (maxX - minX).abs() < 1.0;
-            final fitsY = (maxY - minY).abs() < 1.0;
-            final pivotX = fitsX
-                ? _viewport.center.dx // axis fits → keep centred
-                : (startT.dx - maxX).abs() < 1.0
-                ? _viewport.left // pinned to the document left / start
-                : (startT.dx - minX).abs() < 1.0
-                ? _viewport.right // pinned to the document right / end
-                : _snapFocalPoint.dx;
-            final pivotY = fitsY
-                ? _viewport.center.dy // axis fits → keep centred
-                : (startT.dy - maxY).abs() < 1.0
-                ? _viewport.top // pinned to the document top
-                : (startT.dy - minY).abs() < 1.0
-                ? _viewport.bottom // pinned to the document bottom
-                : _snapFocalPoint.dy;
+            // Pick the scale pivot for one axis. [lo]/[hi] are the min/max allowed translations on
+            // that axis, [t] the current translation, [center]/[edgeAtHi]/[edgeAtLo]/[focal] the
+            // candidate screen pivots:
+            // - axis fits the viewport (range collapses, lo == hi → content centred): no edge to pin
+            //   to, so scale about the viewport centre. Pinning to an edge here is what flashed a
+            //   fitting page to the top (first unit) / bottom (last unit) of the viewport.
+            // - pinned to the hi-/lo-translation edge: anchor there so it doesn't drift off-screen.
+            // - free in the middle: keep the focal point.
+            double pivotFor(double lo, double hi, double t, double center, double edgeAtHi, double edgeAtLo, double focal) {
+              if ((hi - lo).abs() < 1.0) return center;
+              if ((t - hi).abs() < 1.0) return edgeAtHi;
+              if ((t - lo).abs() < 1.0) return edgeAtLo;
+              return focal;
+            }
+
+            // maxX→left / minX→right and maxY→top / minY→bottom (the document edge each translation
+            // extreme corresponds to).
+            final pivotX = pivotFor(minX, maxX, startT.dx, _viewport.center.dx, _viewport.left, _viewport.right, _snapFocalPoint.dx);
+            final pivotY = pivotFor(minY, maxY, startT.dy, _viewport.center.dy, _viewport.top, _viewport.bottom, _snapFocalPoint.dy);
             pivotScreen = Offset(pivotX, pivotY);
           }
           final pivotScene = _transformer.toScene(pivotScreen);
