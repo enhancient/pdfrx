@@ -550,7 +550,6 @@ class InteractiveViewerState extends State<InteractiveViewer> with TickerProvide
   late Matrix4 _snapStartMatrix; // Snap-back for matrix interpolation
   Matrix4? _snapTargetMatrix; // Holds the transform at the exact moment the pinch ends
   late Offset _snapFocalPoint; // Focal point for matrix snap-back interpolation
-  double _lastScale = 1.0; // to enable us to work in incremental scale changes for pinch zoom
   Simulation? simulationX; // Simulations to use if scrollPhysics is specified
   Simulation? simulationY;
   Simulation? combinedSimulation;
@@ -749,9 +748,6 @@ class InteractiveViewerState extends State<InteractiveViewer> with TickerProvide
     if (scrollPhysics != null) {
       // Compute current and desired scales
       final currentScale = _transformer.value.getMaxScaleOnAxis();
-      // scale provided is a desired change in scale between the current scale
-      // and the start of the gesture
-      final scaleChange = scale;
 
       // desired but not necessarily achieved if physics is applied
       final desiredScale = currentScale * scale;
@@ -762,57 +758,32 @@ class InteractiveViewerState extends State<InteractiveViewer> with TickerProvide
         return matrix.clone()..scaleByDouble(allowedScale, allowedScale, allowedScale, 1);
       }
 
-      // Compute ratio of this update's scale to the previous update
-      final scaleRatio = scaleChange / _lastScale;
-      // Store for next frame
-      _lastScale = scaleChange;
-      // Physics requires the incremental scale change since last update
-      final incrementalScale = currentScale * scaleRatio;
-
       // Content-space-based scrollPhysics for scale overscroll and undershoot
       if (_gestureType == _GestureType.scale &&
           !_snapController.isAnimating &&
           ((desiredScale < widget.minScale) || (desiredScale > widget.maxScale))) {
-        final contentSize = _boundaryRect.isInfinite ? _childSize() : _boundaryRect.size;
-
-        // Compute current and desired absolute scale
-        final contentWidth = contentSize.width * currentScale;
-        final desiredContentWidth = contentSize.width * incrementalScale;
-        final contentHeight = contentSize.height * currentScale;
-        final desiredContentHeight = contentSize.height * incrementalScale;
-
-        // Build horizontal and vertical metrics
-        final ScrollMetrics metricsX = FixedScrollMetrics(
-          pixels: contentWidth,
-          minScrollExtent: contentSize.width * widget.minScale,
-          maxScrollExtent: contentSize.width * widget.maxScale,
-          viewportDimension: contentSize.width * widget.maxScale,
-          axisDirection: AxisDirection.right,
-          devicePixelRatio: 1.0,
-        );
-        final ScrollMetrics metricsY = FixedScrollMetrics(
-          pixels: contentHeight,
-          minScrollExtent: contentSize.height * widget.minScale,
-          maxScrollExtent: contentSize.height * widget.maxScale,
-          viewportDimension: contentSize.height * widget.maxScale,
-          axisDirection: AxisDirection.down,
-          devicePixelRatio: 1.0,
-        );
-
-        // Compute content deltas
-        final deltaX = desiredContentWidth - contentWidth;
-        final deltaY = desiredContentHeight - contentHeight;
-
-        // Apply scroll physics half the delta to simulate exceeding a boundary
-        // on one side
-        final adjustedX = scrollPhysics.applyPhysicsToUserOffset(metricsX, deltaX / 2) * 2;
-        final adjustedY = scrollPhysics.applyPhysicsToUserOffset(metricsY, deltaY / 2) * 2;
-
-        // Convert back to scale factors
-        final newScaleX = (contentWidth + adjustedX) / contentWidth;
-        final newScaleY = (contentHeight + adjustedY) / contentHeight;
-        final factor = (newScaleX + newScaleY) / 2;
-
+        // Per-frame overscroll rubber-band. We own this curve rather than calling
+        // scrollPhysics.applyPhysicsToUserOffset: that is an offset-integral model built for
+        // whole-gesture scroll offsets, and applied to per-frame multiplicative scale it is
+        // insensitive near the boundary and unstable past its viewport (its (1-x)^2 factor re-ascends
+        // for x>1, inverting friction into runaway gain). The supplied scrollPhysicsScale still gates
+        // the mode upstream — clamping hard-clamps in _getAllowedScale, bouncing reaches this branch.
+        //
+        // friction = exp(-(overscroll / scale)^sharpness): ~free right at the limit, ramping to a
+        // soft asymptote. `scale` sets where it bites (the overscroll at which friction ≈ 1/e);
+        // `sharpness` > 1 keeps the start free and steepens the wall. Scale is multiplicative, so the
+        // legs differ — zoom-in overscroll is relative to maxScale, zoom-out to minScale — and each
+        // leg carries its own knobs. Tune to taste.
+        final zoomingIn = desiredScale > widget.maxScale;
+        final overscroll = zoomingIn
+            ? math.max(0.0, (currentScale - widget.maxScale) / widget.maxScale)
+            : math.max(0.0, (widget.minScale - currentScale) / widget.minScale);
+        final overscrollScale = zoomingIn ? 0.4 : 0.25;
+        final overscrollSharpness = zoomingIn ? 4.5 : 6;
+        final friction = math.exp(-math.pow(overscroll / overscrollScale, overscrollSharpness).toDouble());
+        // `scale` is this frame's requested multiplicative change; apply only the frictioned part.
+        // Identical friction on both axes keeps the factor a uniform, centred scale.
+        final factor = 1 + (scale - 1) * friction;
         return matrix.clone()..scaleByDouble(factor, factor, factor, 1);
       } else {
         final clampedTotalScale = clampDouble(desiredScale, widget.minScale, widget.maxScale);
@@ -897,7 +868,6 @@ class InteractiveViewerState extends State<InteractiveViewer> with TickerProvide
     _gestureType = null;
     _currentAxis = null;
     _scaleStart = _transformer.value.getMaxScaleOnAxis();
-    _lastScale = 1.0; // ScrollPhysics
     _referenceFocalPoint = _transformer.toScene(details.localFocalPoint);
     _snapFocalPoint = details.localFocalPoint;
     _rotationStart = _currentRotation;
