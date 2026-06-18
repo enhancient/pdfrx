@@ -83,7 +83,17 @@ class SequentialPagesLayout extends PdfLayout {
     double crossOf(double width, double height) => isVertical ? width : height;
     double mainOf(double width, double height) => isVertical ? height : width;
 
-    final scales = _pageScales(pages, viewport, crossOf, mainOf, params.fitMode);
+    // Fit each page, then derive a margin (and spacing) that scales with the largest page, so the
+    // gaps shrink/grow with the document on resize. This keeps one uniform margin (no per-page
+    // normalization) and, because the gaps now scale with the geometry, makes the size delegate's
+    // proportional resize-reposition land correctly with no delegate change. For `none`/`cover` the
+    // reference scale is 1, so the gaps are exactly the supplied values. The fit is recomputed
+    // against the scaled margin so pages still fit exactly (no overflow).
+    var scales = _pageScales(pages, viewport, crossOf, mainOf, params.fitMode, margin);
+    final referenceScale = _largestPageScale(pages, scales);
+    final effectiveMargin = margin * referenceScale;
+    final effectiveSpacing = spacing * referenceScale;
+    scales = _pageScales(pages, viewport, crossOf, mainOf, params.fitMode, effectiveMargin);
 
     // Bake each page's cross-axis fit scale into its size. Rendering scales by the
     // rect/native ratio, so upscaled pages still rasterize at full resolution.
@@ -96,17 +106,28 @@ class SequentialPagesLayout extends PdfLayout {
       maxCross = max(maxCross, crossOf(s.width, s.height));
     }
 
+    // For `fill`/`fit`, widen the column to the available viewport cross and centre the (possibly
+    // narrower) fitted pages in it. This makes `documentSize` exactly the viewport cross — so the
+    // size delegate's cover/fit zoom resolves to ~1 (pages shown at their baked fit, no over- or
+    // under-zoom) regardless of page aspect or the scaled margin. `none`/`cover` keep the natural
+    // (widest-page) extent so the document stays its native width.
+    final availCross = crossOf(viewport.width, viewport.height) - effectiveMargin * 2;
+    final columnCross = switch (params.fitMode) {
+      PdfFitMode.fill || PdfFitMode.fit => max(maxCross, availCross),
+      PdfFitMode.none || PdfFitMode.cover => maxCross,
+    };
+
     final rects = <Rect>[];
-    var main = margin;
+    var main = effectiveMargin;
     for (var i = 0; i < sizes.length; i++) {
       final s = sizes[i];
       final cross = crossOf(s.width, s.height);
       final crossOffset =
-          margin +
+          effectiveMargin +
           switch (crossAxisAlignment) {
             PdfCrossAxisAlignment.start => 0.0,
-            PdfCrossAxisAlignment.center => (maxCross - cross) / 2,
-            PdfCrossAxisAlignment.end => maxCross - cross,
+            PdfCrossAxisAlignment.center => (columnCross - cross) / 2,
+            PdfCrossAxisAlignment.end => columnCross - cross,
           };
       rects.add(
         isVertical
@@ -114,15 +135,39 @@ class SequentialPagesLayout extends PdfLayout {
             : Rect.fromLTWH(main, crossOffset, s.width, s.height),
       );
       main += isVertical ? s.height : s.width;
-      if (i < sizes.length - 1) main += spacing;
+      if (i < sizes.length - 1) main += effectiveSpacing;
     }
-    main += margin;
+    main += effectiveMargin;
 
-    final documentSize = isVertical ? Size(maxCross + margin * 2, main) : Size(main, maxCross + margin * 2);
-    return PdfPageLayout(pageLayouts: rects, documentSize: documentSize, primaryAxis: scrollDirection);
+    final documentSize = isVertical
+        ? Size(columnCross + effectiveMargin * 2, main)
+        : Size(main, columnCross + effectiveMargin * 2);
+    return PdfPageLayout(
+      pageLayouts: rects,
+      documentSize: documentSize,
+      primaryAxis: scrollDirection,
+      effectiveMargin: effectiveMargin,
+    );
   }
 
-  /// Per-page scale to bake into geometry for the given [fitMode].
+  /// The fit scale applied to the largest page (by native area). Used to scale the margin/spacing
+  /// so they shrink and grow with the document. For [PdfFitMode.none]/[PdfFitMode.cover] every scale
+  /// is 1, so this is 1 (gaps unchanged).
+  double _largestPageScale(List<PdfPage> pages, List<double> scales) {
+    var referenceScale = 1.0;
+    var maxArea = -1.0;
+    for (var i = 0; i < pages.length; i++) {
+      final area = pages[i].width * pages[i].height;
+      if (area > maxArea) {
+        maxArea = area;
+        referenceScale = scales[i];
+      }
+    }
+    return referenceScale;
+  }
+
+  /// Per-page scale to bake into geometry for the given [fitMode], fitting into the viewport less
+  /// [effMargin] on each side.
   ///
   /// [PdfFitMode.none] and [PdfFitMode.cover] keep native sizes (cover's zoom is the size
   /// delegate's concern). [PdfFitMode.fill] fills the cross axis; [PdfFitMode.fit] fits
@@ -134,18 +179,19 @@ class SequentialPagesLayout extends PdfLayout {
     double Function(double, double) crossOf,
     double Function(double, double) mainOf,
     PdfFitMode fitMode,
+    double effMargin,
   ) {
     switch (fitMode) {
       case PdfFitMode.none:
       case PdfFitMode.cover:
         return List<double>.filled(pages.length, 1.0);
       case PdfFitMode.fill:
-        final availCross = crossOf(viewport.width, viewport.height) - margin * 2;
+        final availCross = crossOf(viewport.width, viewport.height) - effMargin * 2;
         if (availCross <= 0) return List<double>.filled(pages.length, 1.0);
         return [for (final p in pages) availCross / crossOf(p.width, p.height)];
       case PdfFitMode.fit:
-        final availCross = crossOf(viewport.width, viewport.height) - margin * 2;
-        final availMain = mainOf(viewport.width, viewport.height) - margin * 2;
+        final availCross = crossOf(viewport.width, viewport.height) - effMargin * 2;
+        final availMain = mainOf(viewport.width, viewport.height) - effMargin * 2;
         if (availCross <= 0 || availMain <= 0) return List<double>.filled(pages.length, 1.0);
         return [
           for (final p in pages) min(availCross / crossOf(p.width, p.height), availMain / mainOf(p.width, p.height)),

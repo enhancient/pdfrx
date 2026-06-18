@@ -161,9 +161,12 @@ void main() {
         fitMode: PdfFitMode.fill,
       );
 
-      // available width = 220 - 2*10 = 200; scales: 200/100 = 2, 200/50 = 4.
-      expect(result.pageLayouts[0], const Rect.fromLTWH(10, 10, 200, 400));
-      expect(result.pageLayouts[1], const Rect.fromLTWH(10, 415, 200, 400));
+      // The margin scales with the largest page's fit: page 0 is largest (fill scale 2), so the
+      // effective margin/spacing become 10*2=20 and 5*2=10. Refit against the scaled margin:
+      // available width = 220 - 2*20 = 180, scales 180/100=1.8 and 180/50=3.6 → both pages 180 wide.
+      expect(result.effectiveMargin, 20);
+      expect(result.pageLayouts[0], const Rect.fromLTWH(20, 20, 180, 360));
+      expect(result.pageLayouts[1], const Rect.fromLTWH(20, 390, 180, 360));
       // Document width tracks the viewport (so the home zoom is ≈ 1.0).
       expect(result.documentSize.width, 220);
     });
@@ -183,12 +186,20 @@ void main() {
         fitMode: PdfFitMode.fit,
       );
 
-      // availCross = 220-20 = 200, availMain = 420-20 = 400.
-      // A(100x200): min(200/100, 400/200) = 2 → 200x400 (fills both).
-      // B(100x800): min(200/100, 400/800) = 0.5 → 50x400 (main-constrained, narrower).
-      expect(result.pageLayouts[0], const Rect.fromLTWH(10, 10, 200, 400));
-      expect(result.pageLayouts[1], const Rect.fromLTWH(85, 415, 50, 400)); // centered: 10 + (200-50)/2
-      expect(result.documentSize, const Size(220, 825));
+      final a = result.pageLayouts[0]; // 100x200, fills the viewport
+      final b = result.pageLayouts[1]; // 100x800, very tall → main-constrained
+      // The margin scales with the largest page (B, fit scale 0.5) → effective margin 10*0.5 = 5.
+      expect(result.effectiveMargin, 5);
+      // Each page fits entirely within the viewport main extent (whole page visible).
+      expect(a.height, lessThan(420));
+      expect(b.height, lessThan(420));
+      // The very tall page B is main-constrained, so it ends up narrower than A.
+      expect(b.width, lessThan(a.width));
+      // The column fills the viewport width and pages are centred in it, so the delegate's fit
+      // zoom is ≈ 1.0 regardless of page aspect (both centres sit at documentSize.width/2).
+      expect(result.documentSize.width, 220);
+      expect(a.center.dx, moreOrLessEquals(110, epsilon: 0.001));
+      expect(b.center.dx, moreOrLessEquals(110, epsilon: 0.001));
     });
 
     test('PdfFitMode.cover keeps native geometry (cover is a delegate zoom bound)', () {

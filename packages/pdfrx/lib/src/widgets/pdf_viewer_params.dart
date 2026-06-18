@@ -117,7 +117,12 @@ class PdfViewerParams {
          'Please configure these values in the sizeDelegateProvider instead.',
        );
 
-  /// Margin around the page.
+  /// Margin around the page, used by the built-in layout.
+  ///
+  /// When [layout] is set, that layout's own margin is authoritative (it bakes the margin into the
+  /// geometry and reports it via `PdfPageLayout.effectiveMargin`), and the viewer uses it everywhere
+  /// — geometry, size delegate, navigation, and fit-zoom — so this value is ignored. E.g. with
+  /// `SequentialPagesLayout`, set the margin on the layout, not here.
   final double margin;
 
   /// Background color of the viewer.
