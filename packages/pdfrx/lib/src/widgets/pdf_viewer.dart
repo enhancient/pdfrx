@@ -256,6 +256,15 @@ class _PdfViewerState extends State<PdfViewer>
   // params.pageTransition == PdfPageTransition.discrete; otherwise inert.
   int? _interactionStartPage; // page/spread the drag began on
   bool _hadScaleChangeInInteraction = false; // true once a pinch is detected in this gesture
+  // |scale - 1| above this counts as a real zoom; below it is two-finger trackpad-pan jitter, which
+  // must page rather than be culled as a pinch. (A pinch crosses it within a frame or two.)
+  static const _discreteZoomScaleThreshold = 0.01;
+  // A two-finger gesture is ambiguous at the start (pinch vs trackpad pan). While unresolved, keep
+  // the boundary confined to the current unit so a focal-zoom can't slide a width-constrained page
+  // to a top/bottom edge (a flash). _onInteractionUpdate resolves it.
+  bool _discretePinchPending = false;
+  Offset? _discreteGestureStartFocal; // focal point at gesture start, to tell a pan from a pinch
+  static const _discretePanReleaseSlop = 8.0; // focal travel (screen px) that resolves the gesture as a pan
   bool _isActiveGesture = false; // true between interaction start and end
   bool _isActivelyZooming = false; // true during an active pinch-zoom (cull neighbours)
   double _discreteSpacingZoom = 1.0; // zoom the discrete slot spacing is currently laid out for
@@ -1128,6 +1137,7 @@ class _PdfViewerState extends State<PdfViewer>
     }
     // The pinch is over; any settling bounce keeps neighbours culled via _hasActiveAnimations.
     _isActivelyZooming = false;
+    _discretePinchPending = false;
     _stopInteraction();
   }
 
@@ -1139,32 +1149,35 @@ class _PdfViewerState extends State<PdfViewer>
     if (widget.params.pageTransition == PdfPageTransition.discrete) {
       _interactionStartPage = _focusedPageNumber;
       _hadScaleChangeInInteraction = false;
-      // A 2+ finger gesture is a pinch/zoom: start culling neighbours on the very first frame.
-      // Otherwise the cull only latches once the scale-change passes a threshold a frame or two in,
-      // and the initial focal-zoom (with the boundary still extended toward the neighbour) flashes
-      // the single edge neighbour on the first/last unit. (Trackpad/wheel scroll is one pointer and
-      // routed to page navigation, so this only fires for an actual pinch.)
-      if (details.pointerCount >= 2) {
-        _isActivelyZooming = true;
-        _markDiscreteZoom();
-      }
+      _discreteGestureStartFocal = details.localFocalPoint;
+      // A two-finger gesture is ambiguous here — pinch or trackpad pan, indistinguishable at the
+      // start (both begin at scale ≈ 1.0). Mark it pending so the boundary stays confined until
+      // _onInteractionUpdate resolves it; that way a focal-zoom can't flash the page to an edge, and
+      // a pan still pages once it proves itself. A single-pointer drag is never a pinch, so skip it.
+      _discretePinchPending = details.pointerCount >= 2;
     }
     widget.params.onInteractionStart?.call(details);
   }
 
   void _onInteractionUpdate(ScaleUpdateDetails details) {
     if (widget.params.pageTransition == PdfPageTransition.discrete) {
-      // ScaleUpdateDetails.scale is cumulative from gesture start. A single-pointer drag reports an
-      // exact 1.0; any deviation means a pinch — so cull neighbours from the very first deviated
-      // frame (the cull latched only once it passed 0.01, leaving an opening at the start that
-      // flashed the single edge neighbour on the first/last unit). _markDiscreteZoom also keeps the
-      // cull latched a short window past the last update to cover the settle (snap / reflow / clamp).
-      if (details.scale != 1.0) {
+      // Resolve the ambiguous two-finger gesture. ScaleUpdateDetails.scale is cumulative from gesture
+      // start. A pinch moves it decisively (and keeps its focal point ~fixed as the fingers spread);
+      // a trackpad pan holds scale at ≈ 1.0 while translating the focal point. Classify by that:
+      //   - scale past the threshold ⇒ pinch: cull neighbours and stop the boundary extending (via
+      //     _hadScaleChangeInInteraction); _markDiscreteZoom keeps the cull latched a short window
+      //     past the last update to cover the settle (snap / reflow / clamp).
+      //   - else the focal point travels past the slop ⇒ pan: clear pending so the boundary extends
+      //     toward the neighbour and the gesture pages.
+      if ((details.scale - 1.0).abs() > _discreteZoomScaleThreshold) {
+        _discretePinchPending = false;
         _markDiscreteZoom();
-      }
-      if ((details.scale - 1.0).abs() > 0.01) {
         _hadScaleChangeInInteraction = true;
         _isActivelyZooming = true;
+      } else if (_discretePinchPending &&
+          _discreteGestureStartFocal != null &&
+          (details.localFocalPoint - _discreteGestureStartFocal!).distance > _discretePanReleaseSlop) {
+        _discretePinchPending = false;
       }
     }
     widget.params.onInteractionUpdate?.call(details);
@@ -1435,7 +1448,7 @@ class _PdfViewerState extends State<PdfViewer>
     // fixed fraction of the viewport (a fixed extension can't carry a unit past the most-visible
     // threshold when the main axis is very long). On release _handleDiscretePageTransition decides
     // whether to commit or snap back.
-    if (_isActiveGesture && !_hadScaleChangeInInteraction && !_discreteZooming) {
+    if (_isActiveGesture && !_hadScaleChangeInInteraction && !_discreteZooming && !_discretePinchPending) {
       final vertical = _discreteIsVertical(layout);
       final prevPage = _adjacentDiscretePage(pageNumber, layout, -1);
       final nextPage = _adjacentDiscretePage(pageNumber, layout, 1);
